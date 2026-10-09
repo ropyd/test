@@ -19,6 +19,7 @@
 #   PVE_HOST      address of this host as seen by the container [auto]
 #   ALLOW_CTIDS   space-separated CT IDs the dashboard may manage [prompted]
 #   ASSUME_YES=1  don't ask before changing host files
+#   SETUP_GATE=1  with CTID=<existing>: also (re)do the host-side gate setup
 set -Eeuo pipefail
 trap 'printf "\033[1;31mxx\033[0m failed on line %s\n" "$LINENO" >&2' ERR
 
@@ -36,7 +37,7 @@ CTID="${CTID:-}"; CT_HOSTNAME="${CT_HOSTNAME:-updatedash}"
 CORES="${CORES:-1}"; RAM="${RAM:-256}"; DISK="${DISK:-2}"; BRIDGE="${BRIDGE:-vmbr0}"
 IP="${IP:-dhcp}"; GW="${GW:-}"
 STORAGE="${STORAGE:-}"; TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-}"
-PVE_HOST="${PVE_HOST:-}"; ALLOW_CTIDS="${ALLOW_CTIDS:-}"; ASSUME_YES="${ASSUME_YES:-0}"
+PVE_HOST="${PVE_HOST:-}"; ALLOW_CTIDS="${ALLOW_CTIDS:-}"; ASSUME_YES="${ASSUME_YES:-0}"; SETUP_GATE="${SETUP_GATE:-0}"
 SRC_DIR=/root/updatedash-src
 GATE_BIN="${GATE_BIN:-/usr/local/sbin/updatedash-gate}"
 ALLOW_FILE="${ALLOW_FILE:-/etc/updatedash-gate.allow}"
@@ -128,6 +129,7 @@ setup_gate() {
     read -rp "CT IDs the dashboard may update (space separated, e.g. 110 111 112): " ALLOW_CTIDS
   fi
   local id ids=()
+  ALLOW_CTIDS="${ALLOW_CTIDS//[^0-9]/ }"   # accept "106, 114" or "106 114." etc.
   for id in $ALLOW_CTIDS; do
     [[ "$id" =~ ^[0-9]+$ ]] || die "Bad CT id: $id"
     [ "$id" != "$CTID" ] || continue
@@ -178,7 +180,7 @@ pct exec "$CTID" -- bash "$INSTALL_DIR/install.sh"
 pct exec "$CTID" -- rm -rf "$SRC_DIR"
 
 CT_IP="$(pct exec "$CTID" -- hostname -I | awk '{print $1}')"
-[ "$MODE" = create ] && setup_gate
+if [ "$MODE" = create ] || [ "$SETUP_GATE" = 1 ]; then setup_gate; fi
 pct exec "$CTID" -- systemctl restart updatedash
 
 echo
