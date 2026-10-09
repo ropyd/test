@@ -59,9 +59,14 @@ create_container() {
 
   msg "Looking for a Debian 13 template"
   pveam update >/dev/null 2>&1 || warn "pveam update failed; using the cached template list"
-  local tpl
-  tpl="$(pveam available --section system | awk '$2 ~ /^debian-13-standard/ {print $2}' | sort -V | tail -1)"
-  [ -n "$tpl" ] || die "No debian-13-standard template found."
+  local tpl arch
+  case "$(dpkg --print-architecture)" in
+    amd64) arch=amd64 ;;
+    arm64) arch=arm64 ;;
+    *) die "Unsupported host architecture: $(dpkg --print-architecture)" ;;
+  esac
+  tpl="$(pveam available --section system | awk -v a="$arch" '$2 ~ ("^debian-13-standard_.*_" a "\\.tar") {print $2}' | sort -V | tail -1)"
+  [ -n "$tpl" ] || die "No debian-13-standard ($arch) template found. Try: pveam update"
   pveam list "$TEMPLATE_STORAGE" | grep -qF "$tpl" || { msg "Downloading $tpl"; pveam download "$TEMPLATE_STORAGE" "$tpl"; }
 
   local net="name=eth0,bridge=${BRIDGE}"
@@ -74,7 +79,7 @@ create_container() {
   pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${tpl}" \
     --hostname "$CT_HOSTNAME" --unprivileged 1 --onboot 1 --tags updatedash \
     --cores "$CORES" --memory "$RAM" --swap 0 --rootfs "${STORAGE}:${DISK}" \
-    --net0 "$net" --start 1
+    --net0 "$net" --features nesting=1 --start 1
 
   msg "Waiting for the container network"
   local i
@@ -82,7 +87,7 @@ create_container() {
     pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 && return 0
     sleep 2
   done
-  die "CT $CTID has no network/DNS after 80s. Check BRIDGE, IP/GW and DNS, then re-run with CTID=$CTID."
+  die "CT $CTID has no network/DNS after 80s. Check BRIDGE, IP/GW and DNS. To start over: pct stop $CTID; pct destroy $CTID --purge"
 }
 
 # ---------------------------------------------------------------- get the code in
