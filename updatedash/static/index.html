@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Update Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <h1>Updates</h1>
+      <p id="sub" class="muted">Loading…</p>
+    </div>
+    <button id="checkAll" class="btn">Check all</button>
+  </header>
+
+  <section id="chips" class="chips" aria-live="polite"></section>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Installed</th>
+          <th>Latest</th>
+          <th>Status</th>
+          <th>OS packages</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <section id="logpanel" class="logpanel" hidden>
+    <div class="loghead">
+      <strong id="logtitle"></strong>
+      <span id="logstatus" class="badge"></span>
+      <button id="logclose" class="btn small ghost">Hide</button>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h2 id="confirmTitle"></h2>
+    <p id="confirmBody" class="muted"></p>
+    <div class="dialogbtns">
+      <button value="cancel" class="btn ghost">Cancel</button>
+      <button id="confirmOk" value="ok" class="btn primary">Update</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
