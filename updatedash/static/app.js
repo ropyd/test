@@ -304,5 +304,36 @@
   });
   $('#logclose').addEventListener('click', () => { logPanel.hidden = true; watching = null; });
 
+  // Copy the log. navigator.clipboard only exists on HTTPS/localhost, so fall back to a hidden textarea
+  // (this dashboard is often opened over plain http://ip:8099).
+  const copyBtn = $('#logcopy');
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+    }
+    const ta = el('textarea', { readonly: true, 'aria-hidden': 'true', style: 'position:fixed;left:-9999px;top:0' });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  copyBtn.addEventListener('click', async () => {
+    const title = logTitle.textContent;
+    const text = `${title} [${logStatus.textContent}]\n\n${logPre.textContent}`.trimEnd() + '\n';
+    const ok = await copyText(text);
+    if (!ok) {  // last resort: select the log so Ctrl/Cmd+C works
+      const r = document.createRange();
+      r.selectNodeContents(logPre);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    copyBtn.textContent = ok ? 'Copied' : 'Press Ctrl/Cmd+C';
+    setTimeout(() => { copyBtn.textContent = 'Copy log'; }, 2000);
+  });
+
   refresh();
 })();

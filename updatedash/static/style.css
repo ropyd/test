@@ -105,7 +105,7 @@ td.right .btn + .btn { margin-left: 6px; }
 
 .logpanel { margin-top: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .loghead { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
-.loghead .btn { margin-left: auto; }
+.loghead .btn:first-of-type { margin-left: auto; }
 #log {
   margin: 0; padding: 14px; max-height: 360px; overflow: auto;
   background: var(--log-bg); color: var(--log-text);

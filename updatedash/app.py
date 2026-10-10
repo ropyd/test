@@ -38,8 +38,9 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
 SNAP_RE = re.compile(r"pre-update-\d{8}-\d{6}")
 
 # Community-scripts containers ship an `update` command. PHS_SILENT=1 is its supported unattended mode: it
-# skips the whiptail menu and runs the silent update (it does the same when there is no terminal).
-COMMUNITY_UPDATE = "export PHS_SILENT=1 TERM=dumb; update"
+# skips the whiptail menu and runs the silent update. TERM must not be "dumb": the scripts call `clear`,
+# which exits 1 on a dumb terminal and trips their error handler.
+COMMUNITY_UPDATE = "export PHS_SILENT=1 TERM=xterm; update"
 APT_ENV = "export DEBIAN_FRONTEND=noninteractive;"
 OS_UPGRADE = APT_ENV + " apt-get update -qq && apt-get -y -o Dpkg::Options::=--force-confold upgrade"
 
