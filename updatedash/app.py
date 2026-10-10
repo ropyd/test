@@ -4,8 +4,12 @@ updates available and can run the update on request.
 
 It talks to the Proxmox host over SSH (restricted key, see pve-gate.py) and runs
 `pct exec` inside each container. Only dependency besides the stdlib is PyYAML.
+
+Every container the gate allows is discovered automatically and listed. Known apps get a
+preset (see CATALOG); anything in `services:` in the config overrides the preset for that CT.
 """
 import base64
+import copy
 import hmac
 import json
 import mimetypes
@@ -39,6 +43,50 @@ APT_ENV = "export DEBIAN_FRONTEND=noninteractive;"
 OS_UPGRADE = APT_ENV + " apt-get update -qq && apt-get -y -o Dpkg::Options::=--force-confold upgrade"
 
 
+def _gh(repo, slug):
+    # community-scripts store the installed release tag in ~/.<app>, older ones in /opt/*_version.txt
+    return {"latest": {"type": "github", "repo": repo},
+            "current": f"cat /root/.{slug} 2>/dev/null || cat /opt/*_version.txt 2>/dev/null"}
+
+
+def _apt(pkg, link=None):
+    d = {"latest": {"type": "apt", "package": pkg}}
+    if link:
+        d["link"] = link
+    return d
+
+
+# Presets matched against the container's hostname (first match wins). Verify the `current`
+# file for your apps; a wrong guess only shows "Unknown" for the installed version.
+CATALOG = [
+    (r"jellyfin", _apt("jellyfin", "https://github.com/jellyfin/jellyfin/releases")),
+    (r"plex", _apt("plexmediaserver", "https://forums.plex.tv/t/plex-media-server/30447")),
+    (r"tailscale", _apt("tailscale", "https://tailscale.com/changelog")),
+    (r"cloudflared", _apt("cloudflared", "https://github.com/cloudflare/cloudflared/releases")),
+    (r"sonarr", _gh("Sonarr/Sonarr", "sonarr")),
+    (r"radarr", _gh("Radarr/Radarr", "radarr")),
+    (r"prowlarr", _gh("Prowlarr/Prowlarr", "prowlarr")),
+    (r"lidarr", _gh("Lidarr/Lidarr", "lidarr")),
+    (r"jackett", _gh("Jackett/Jackett", "jackett")),
+    (r"autobrr", _gh("autobrr/autobrr", "autobrr")),
+    (r"flaresolverr", _gh("FlareSolverr/FlareSolverr", "flaresolverr")),
+    (r"vaultwarden", _gh("dani-garcia/vaultwarden", "vaultwarden")),
+    (r"homarr", _gh("homarr-labs/homarr", "homarr")),
+    (r"heimdall", _gh("linuxserver/Heimdall", "heimdall")),
+    (r"traefik", _gh("traefik/traefik", "traefik")),
+    (r"nginx.?proxy", _gh("NginxProxyManager/nginx-proxy-manager", "nginxproxymanager")),
+]
+
+
+def auto_service(ctid, name):
+    svc = {"name": name, "ctid": ctid, "auto": True}
+    for pat, extra in CATALOG:
+        if re.search(pat, name.lower()):
+            svc.update(copy.deepcopy(extra))
+            break
+    return svc
+
+
 def load_config():
     with open(CONFIG_PATH) as f:
         cfg = yaml.safe_load(f) or {}
@@ -49,18 +97,21 @@ def load_config():
     cfg.setdefault("keep_snapshots", 2)
     cfg.setdefault("check_interval_minutes", 360)
     cfg.setdefault("github_token", "")
-    cfg.setdefault("services", [])
+    cfg["services"] = cfg.get("services") or []
+    cfg.setdefault("discover", cfg["transport"] == "pve")
     cfg["password"] = os.environ.get("UPDATEDASH_PASSWORD", cfg.get("password") or "")
     if not cfg["password"] or cfg["password"] == "CHANGE-ME":
         sys.exit("Set a real `password` in the config (or UPDATEDASH_PASSWORD).")
     if cfg["transport"] not in ("pve", "local"):
         sys.exit("transport must be 'pve' or 'local'")
-    names = set()
+    seen = set()
     for s in cfg["services"]:
-        if not s.get("name") or s["name"] in names:
-            sys.exit("every service needs a unique name")
-        names.add(s["name"])
+        if not s.get("name") or s.get("ctid") is None:
+            sys.exit("every entry in `services` needs a name and a ctid")
         s["ctid"] = int(s["ctid"])
+        if s["ctid"] in seen:
+            sys.exit(f"duplicate ctid {s['ctid']} in services")
+        seen.add(s["ctid"])
     return cfg
 
 
@@ -123,10 +174,43 @@ class Runner:
         remote = shlex.join(["pct", "exec", str(ctid), "--", "bash", "-c", cmd])
         return run_argv(self._ssh(remote), timeout, on_line)
 
+    # -- local transport test hooks: UPDATEDASH_FAKE_LIST is a `pct list` dump; the allow list is a JSON file
+    def _local_allow(self):
+        try:
+            return set(json.loads((STATE_DIR / "local_allow.json").read_text()))
+        except (OSError, ValueError):
+            return None
+
+    def _local_gate(self, args):
+        allow = self._local_allow()
+        if args == ("allow", "list"):
+            return 0, [str(i) for i in sorted(allow or [])]
+        if args == ("allow", "protected"):
+            return 0, [x for x in os.environ.get("UPDATEDASH_FAKE_PROTECTED", "").split(",") if x]
+        if args[:1] == ("allow",) and len(args) == 3:
+            cur = set(allow or [])
+            (cur.add if args[1] == "add" else cur.discard)(int(args[2]))
+            (STATE_DIR / "local_allow.json").write_text(json.dumps(sorted(cur)))
+            return 0, [f"ok {args[1]} {args[2]}"]
+        return 1, ["unsupported"]
+
     def pct(self, *args, timeout=120, on_line=None):
         if self.local:
+            fake = os.environ.get("UPDATEDASH_FAKE_LIST")
+            if args[:1] == ("list",) and fake:
+                lines = Path(fake).read_text().splitlines()
+                allow = self._local_allow()
+                if "--all" in args or allow is None:
+                    return 0, lines
+                return 0, [l for i, l in enumerate(lines) if i == 0 or (l.split() or [""])[0] in {str(a) for a in allow}]
             return 0, ["(local transport: skipped pct " + " ".join(args) + ")"]
         return run_argv(self._ssh(shlex.join(["pct", *args])), timeout, on_line)
+
+    def gate(self, *args, timeout=30):
+        """Non-pct gate requests: `allow list|add|remove`."""
+        if self.local:
+            return self._local_gate(args)
+        return run_argv(self._ssh(shlex.join(args)), timeout)
 
 
 # ---------------------------------------------------------------- version logic
@@ -134,7 +218,12 @@ class Runner:
 _gh_cache = {}
 
 
+def safe_link(u):
+    return u if isinstance(u, str) and u.startswith("https://") and len(u) < 500 else None
+
+
 def github_latest(repo, token):
+    """Latest release as {"tag", "url", "body"} (cached 30 min)."""
     c = _gh_cache.get(repo)
     if c and time.time() - c[0] < 1800:
         return c[1]
@@ -143,9 +232,11 @@ def github_latest(repo, token):
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest", headers=headers)
     with urllib.request.urlopen(req, timeout=15) as r:
-        tag = json.load(r)["tag_name"]
-    _gh_cache[repo] = (time.time(), tag)
-    return tag
+        rel = json.load(r)
+    info = {"tag": rel["tag_name"], "url": safe_link(rel.get("html_url")),
+            "body": (rel.get("body") or "").replace("\r", "").strip()[:1500]}
+    _gh_cache[repo] = (time.time(), info)
+    return info
 
 
 def norm(v):
@@ -173,47 +264,133 @@ def transport_error(rc, lines):
     return None
 
 
+def app_check_type(svc):
+    lat = svc.get("latest") or {}
+    return lat.get("type") or ("github" if lat.get("repo") else None)
+
+
+def can_app_update(svc):
+    return bool(svc.get("update") or app_check_type(svc))
+
+
 # ---------------------------------------------------------------- core
+
+def new_state():
+    return {"status": "unknown", "installed": None, "latest": None, "os_updates": None, "error": None,
+            "checked_at": None, "checking": False, "job": None, "ct_status": None,
+            "link": None, "notes": None, "installed_hint": None}
+
 
 class Dash:
     def __init__(self, cfg):
         self.cfg = cfg
         self.runner = Runner(cfg)
-        self.services = {s["name"]: s for s in cfg["services"]}
-        self.order = [s["name"] for s in cfg["services"]]
-        self.state = {n: {"status": "unknown", "installed": None, "latest": None, "os_updates": None,
-                          "error": None, "checked_at": None, "checking": False, "job": None}
-                      for n in self.order}
+        self.explicit = {s["ctid"]: s for s in cfg["services"]}
+        self.services = dict(self.explicit)      # ctid -> service definition
+        self.order = sorted(self.services)
+        self.state = {c: new_state() for c in self.order}
+        self.inventory_error = None
         self.jobs = {}
         self.lock = threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=4)
         self.last_sweep = 0
 
+    # -- discovery
+    def sync_inventory(self):
+        if not self.cfg["discover"]:
+            return
+        rc, out = self.runner.pct("list", timeout=30)
+        inv = {}
+        if rc == 0:
+            for ln in out:
+                t = ln.split()
+                if len(t) >= 3 and t[0].isdigit():
+                    inv[int(t[0])] = (t[1], t[-1])
+        if rc != 0:
+            self.inventory_error = "Could not list containers: " + " ".join(out[-2:])[:200]
+            return
+        with self.lock:
+            self.inventory_error = None
+            services = {}
+            for cid, (_status, name) in inv.items():
+                svc = copy.deepcopy(self.explicit.get(cid) or auto_service(cid, name))
+                services[cid] = svc
+            for cid, svc in self.explicit.items():
+                services.setdefault(cid, svc)
+            self.services = services
+            self.order = sorted(services)
+            for cid in services:
+                st = self.state.setdefault(cid, new_state())
+                st["ct_status"] = inv[cid][0] if cid in inv else None
+            for cid in list(self.state):
+                if cid not in services:
+                    del self.state[cid]
+
+    def inventory(self):
+        """Every container on the node with a `managed` flag (needs GUI management on the host)."""
+        rc, out = self.runner.pct("list", "--all", timeout=30)
+        if rc != 0:
+            msg = " ".join(out[-2:])
+            return {"manage": False, "message": msg[:300] or "the gate refused the request", "containers": []}
+        rc2, allowed = self.runner.gate("allow", "list")
+        managed = {int(x) for x in allowed if x.strip().isdigit()} if rc2 == 0 else set()
+        rc3, prot = self.runner.gate("allow", "protected")
+        locked = {int(x) for x in prot if x.strip().isdigit()} if rc3 == 0 else set()
+        rows = []
+        for ln in out:
+            t = ln.split()
+            if len(t) >= 3 and t[0].isdigit():
+                rows.append({"ctid": int(t[0]), "status": t[1], "name": t[-1], "managed": int(t[0]) in managed,
+                             "locked": int(t[0]) in locked})
+        return {"manage": True, "containers": sorted(rows, key=lambda r: r["ctid"])}
+
+    def set_allowed(self, ctid, add):
+        rc, out = self.runner.gate("allow", "add" if add else "remove", str(ctid))
+        if rc != 0:
+            return False, (" ".join(out[-2:]) or "the gate refused the request")[:300]
+        self.sync_inventory()
+        if add and ctid in self.services:
+            self.check_async(ctid)
+        return True, "ok"
+
     # -- checking
-    def check(self, name):
-        svc = self.services[name]
+    def check(self, ctid):
+        svc = self.services.get(ctid)
+        if not svc:
+            return
         with self.lock:
-            if self.state[name]["checking"]:
+            st = self.state[ctid]
+            if st["checking"]:
                 return
-            self.state[name]["checking"] = True
-        res = {"installed": None, "latest": None, "os_updates": None, "error": None}
-        try:
-            self._check_into(svc, res)
-        except Exception as e:  # noqa: BLE001 - surface any failure in the UI
-            res["error"] = f"{type(e).__name__}: {e}"
-        if res["error"]:
-            status = "error"
-        elif res["installed"] and res["latest"]:
-            status = "current" if same(res["installed"], res["latest"]) else "update"
+            st["checking"] = True
+            stopped = st["ct_status"] == "stopped"
+        res = {"installed": None, "latest": None, "os_updates": None, "error": None,
+               "link": safe_link(svc.get("link")), "notes": None, "installed_hint": None}
+        if stopped:
+            status = "stopped"
         else:
-            status = "unknown"
+            try:
+                self._check_into(svc, res)
+            except Exception as e:  # noqa: BLE001 - surface any failure in the UI
+                res["error"] = f"{type(e).__name__}: {e}"
+            if res["error"]:
+                status = "error"
+            elif app_check_type(svc):
+                if res["installed"] and res["latest"]:
+                    status = "current" if same(res["installed"], res["latest"]) else "update"
+                else:
+                    status = "unknown"
+            else:
+                status = "os" if (res["os_updates"] or 0) > 0 else "nocheck"
         with self.lock:
-            self.state[name].update(res, status=status, checking=False, checked_at=time.time())
+            if ctid in self.state:
+                self.state[ctid].update(res, status=status, checking=False, checked_at=time.time())
 
     def _check_into(self, svc, res):
         ctid, run = svc["ctid"], self.runner.exec
+        typ = app_check_type(svc)
         lat = svc.get("latest") or {}
-        typ = lat.get("type", "github")
+        prefix = "apt-get update -qq >/dev/null 2>&1; "
         if typ == "apt":
             pkg = shlex.quote(lat["package"])
             rc, out = run(ctid, f"apt-get update -qq >/dev/null 2>&1; apt-cache policy {pkg}", 120)
@@ -227,6 +404,8 @@ class Dash:
             inst = m_i.group(1) if m_i else None
             res["installed"] = None if inst in (None, "(none)") else inst
             res["latest"] = m_c.group(1) if m_c and m_c.group(1) != "(none)" else None
+            if res["installed"] is None:
+                res["installed_hint"] = f"apt package {lat['package']} is not installed"
             prefix = ""
         else:
             if svc.get("current"):
@@ -236,38 +415,53 @@ class Dash:
                     res["error"] = err
                     return
                 res["installed"] = first_line(out) if rc == 0 else None
+                if res["installed"] is None:
+                    res["installed_hint"] = "no version found by: " + svc["current"][:100]
+            elif typ in ("github", "command"):
+                res["installed_hint"] = "no `current` command configured for this app"
             if typ == "github":
-                res["latest"] = github_latest(lat["repo"], self.cfg["github_token"])
+                info = github_latest(lat["repo"], self.cfg["github_token"])
+                res["latest"] = info["tag"]
+                res["link"] = res["link"] or info["url"]
+                res["notes"] = info["body"] or None
             elif typ == "command":
                 rc, out = run(ctid, lat["cmd"], 30)
                 res["latest"] = first_line(out) if rc == 0 else None
-            prefix = "apt-get update -qq >/dev/null 2>&1; "
         if svc.get("os_updates", True):
             rc, out = run(ctid, prefix + "apt-get -s upgrade 2>/dev/null | grep -c '^Inst' || true", 90)
+            err = transport_error(rc, out)
+            if err:
+                res["error"] = err
+                return
             n = first_line(out)
             res["os_updates"] = int(n) if n and n.isdigit() else None
 
     def check_all(self):
         self.last_sweep = time.time()
-        list(self.pool.map(self.check, self.order))
+        self.sync_inventory()
+        list(self.pool.map(self.check, list(self.order)))
 
-    def check_async(self, name=None):
-        if name:
-            self.pool.submit(self.check, name)
+    def check_async(self, ctid=None):
+        if ctid is not None:
+            self.pool.submit(self.check, ctid)
         else:
             threading.Thread(target=self.check_all, daemon=True).start()
 
     # -- updating
-    def start_update(self, name, kind):
-        svc = self.services[name]
+    def start_update(self, ctid, kind):
+        svc = self.services[ctid]
+        if kind == "app" and not can_app_update(svc):
+            raise ValueError("no application update is defined for this container (OS upgrade only)")
         with self.lock:
-            cur = self.state[name]["job"]
+            if self.state[ctid]["ct_status"] == "stopped":
+                raise ValueError("the container is stopped")
+            cur = self.state[ctid]["job"]
             if cur and self.jobs[cur]["status"] == "running":
-                raise ValueError("an update is already running for this service")
+                raise ValueError("an update is already running for this container")
             jid = uuid.uuid4().hex[:12]
-            self.jobs[jid] = {"id": jid, "service": name, "kind": kind, "status": "running",
+            self.jobs[jid] = {"id": jid, "service": svc["name"], "kind": kind, "status": "running",
                               "lines": [], "started": time.time(), "ended": None}
-            self.state[name]["job"] = jid
+            self.state[ctid]["job"] = jid
             for old in sorted(self.jobs.values(), key=lambda j: j["started"])[:-40]:
                 if old["status"] != "running":
                     self.jobs.pop(old["id"], None)
@@ -279,9 +473,9 @@ class Dash:
             return OS_UPGRADE
         if svc.get("update"):
             return svc["update"]
-        lat = svc.get("latest") or {}
-        if lat.get("type") == "apt":
-            return f"{APT_ENV} apt-get update -qq && apt-get install -y --only-upgrade {shlex.quote(lat['package'])}"
+        if app_check_type(svc) == "apt":
+            pkg = (svc.get("latest") or {})["package"]
+            return f"{APT_ENV} apt-get update -qq && apt-get install -y --only-upgrade {shlex.quote(pkg)}"
         return COMMUNITY_UPDATE
 
     def _run_update(self, job, svc, kind):
@@ -290,7 +484,7 @@ class Dash:
         try:
             if self.cfg["snapshot_before_update"] and not self.runner.local:
                 snap = time.strftime("pre-update-%Y%m%d-%H%M%S")
-                log(f"Creating snapshot {snap} of CT {ctid} ...")
+                log(f"Creating snapshot {snap} of CT {ctid} ({svc['name']}) ...")
                 rc, _ = self.runner.pct("snapshot", str(ctid), snap, timeout=300, on_line=log)
                 if rc != 0:
                     log("Snapshot failed, so the update was NOT run. "
@@ -309,7 +503,7 @@ class Dash:
         finally:
             job["status"] = "ok" if ok else "failed"
             job["ended"] = time.time()
-            self.check(svc["name"])
+            self.check(ctid)
 
     def _prune(self, ctid, log):
         keep = int(self.cfg["keep_snapshots"])
@@ -327,15 +521,23 @@ class Dash:
     def view(self):
         with self.lock:
             items = []
-            for n in self.order:
-                s, st = self.services[n], self.state[n]
+            for cid in self.order:
+                s, st = self.services[cid], self.state[cid]
                 job = self.jobs.get(st["job"]) if st["job"] else None
-                items.append({"name": n, "ctid": s["ctid"], **{k: st[k] for k in (
-                    "status", "installed", "latest", "os_updates", "error", "checked_at", "checking")},
-                    "job": st["job"], "running": bool(job and job["status"] == "running"),
-                    "job_status": job["status"] if job else None})
-            return {"services": items, "updates": sum(i["status"] == "update" for i in items),
-                    "os_updates": sum((i["os_updates"] or 0) > 0 for i in items),
+                items.append({"name": s["name"], "ctid": cid, "can_app_update": can_app_update(s),
+                              **{k: st[k] for k in ("status", "installed", "latest", "os_updates", "error",
+                                                    "checked_at", "checking", "ct_status", "link",
+                                                    "installed_hint")},
+                              "notes": st["notes"] if st["status"] == "update" else None,
+                              "job": st["job"], "running": bool(job and job["status"] == "running"),
+                              "job_status": job["status"] if job else None})
+            return {"services": items,
+                    "total": len(items),
+                    "updates": sum(i["status"] == "update" for i in items),
+                    "os_pending": sum((i["os_updates"] or 0) > 0 for i in items),
+                    "errors": sum(i["status"] == "error" for i in items),
+                    "stopped": sum(i["status"] == "stopped" for i in items),
+                    "inventory_error": self.inventory_error,
                     "last_sweep": self.last_sweep or None,
                     "interval": self.cfg["check_interval_minutes"]}
 
@@ -397,6 +599,8 @@ def make_handler(dash):
                 return
             if url.path == "/api/services":
                 return self._send(200, dash.view())
+            if url.path == "/api/inventory":
+                return self._send(200, dash.inventory())
             m = re.fullmatch(r"/api/jobs/([0-9a-f]{12})", url.path)
             if m:
                 since = int(parse_qs(url.query).get("since", ["0"])[0] or 0)
@@ -420,18 +624,25 @@ def make_handler(dash):
                 body = json.loads(self.rfile.read(min(n, 10000)) or b"{}")
             except (ValueError, json.JSONDecodeError):
                 return self._send(400, {"error": "invalid JSON"})
-            name = body.get("name")
+            ctid = body.get("ctid")
+            if self.path == "/api/allow":
+                action = body.get("action")
+                if not isinstance(ctid, int) or isinstance(ctid, bool) or not 0 < ctid < 10**9 \
+                        or action not in ("add", "remove"):
+                    return self._send(400, {"error": "bad container or action"})
+                ok, msg = dash.set_allowed(ctid, action == "add")
+                return self._send(200 if ok else 409, {"ok": ok, "message": msg})
+            if ctid is not None and (isinstance(ctid, bool) or not isinstance(ctid, int) or ctid not in dash.services):
+                return self._send(404, {"error": "unknown container"})
             if self.path == "/api/check":
-                if name and name not in dash.services:
-                    return self._send(404, {"error": "unknown service"})
-                dash.check_async(name)
+                dash.check_async(ctid)
                 return self._send(202, {"ok": True})
             if self.path == "/api/update":
                 kind = body.get("kind", "app")
-                if name not in dash.services or kind not in ("app", "os"):
-                    return self._send(400, {"error": "bad service or kind"})
+                if ctid is None or kind not in ("app", "os"):
+                    return self._send(400, {"error": "bad container or kind"})
                 try:
-                    return self._send(202, {"job": dash.start_update(name, kind)})
+                    return self._send(202, {"job": dash.start_update(ctid, kind)})
                 except ValueError as e:
                     return self._send(409, {"error": str(e)})
             self._send(404, {"error": "not found"})
@@ -455,8 +666,8 @@ def main():
                 dash.check_all()
 
     threading.Thread(target=scheduler, daemon=True).start()
-    print(f"updatedash listening on {cfg['listen']} ({len(dash.order)} services, transport={cfg['transport']})",
-          flush=True)
+    print(f"updatedash listening on {cfg['listen']} (transport={cfg['transport']}, "
+          f"discover={cfg['discover']}, {len(dash.explicit)} configured overrides)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

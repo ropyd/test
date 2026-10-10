@@ -16,32 +16,25 @@ keep_snapshots: 2              # keep the newest N pre-update snapshots per CT
 check_interval_minutes: 360
 github_token: ""               # optional; avoids GitHub's anonymous rate limit
 
-# How each service is checked
+# Every container listed in /etc/updatedash-gate.allow on the Proxmox host is discovered and shown
+# automatically (running or stopped). Known apps (Sonarr, Radarr, Prowlarr, Jackett, autobrr,
+# Vaultwarden, Jellyfin, Plex, Traefik, NPM, Tailscale, ...) are recognised by hostname.
+# Containers with no preset still show their OS package updates, and can be OS-upgraded.
+discover: true
+
+# OPTIONAL overrides, matched by CT ID. Use this for apps the presets don't know or get wrong.
 #   latest.type: apt      -> compares installed vs candidate version of one apt package
 #   latest.type: github   -> `current` (a command run inside the CT) vs the latest GitHub release
 #   latest.type: command  -> `current` vs the output of latest.cmd (run inside the CT)
-# How it is updated
-#   apt services:   apt-get install --only-upgrade <package>   (non-interactive, reliable)
-#   others:         the community-scripts `update` command, with Enter pressed on the default menu item
-#   `update:`       override with any command you like
-# `os_updates: false` hides the OS package count for a service.
-services:
-  - name: Jellyfin
-    ctid: 110
-    latest: {type: apt, package: jellyfin}
-    # update: "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --only-upgrade jellyfin jellyfin-ffmpeg7"
-
-  - name: Plex
-    ctid: 111
-    latest: {type: apt, package: plexmediaserver}
-
-  # VERIFY the `current:` file for these two (see README, "Find the version file").
-  - name: Sonarr
-    ctid: 112
-    current: "cat /opt/Sonarr_version.txt"
-    latest: {type: github, repo: Sonarr/Sonarr}
-
-  - name: Vaultwarden
-    ctid: 113
-    current: "cat /opt/vaultwarden_version.txt"
-    latest: {type: github, repo: dani-garcia/vaultwarden}
+#   link: https://...        release notes / changelog page shown next to the version (https only)
+#   update:                  command to run for "Update" (default: apt-get --only-upgrade for apt,
+#                            otherwise the community-scripts `update` command)
+#   os_updates: false        hide the OS package count
+# Find the version file of a community-script app with:
+#   pct exec <CTID> -- sh -c 'ls -A /root | grep "^\."; ls /opt/*_version.txt 2>/dev/null'
+services: []
+#  - name: My app
+#    ctid: 120
+#    current: "cat /root/.myapp"
+#    latest: {type: github, repo: owner/repo}
+#    update: "/usr/local/bin/my-update.sh"

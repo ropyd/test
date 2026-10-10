@@ -39,8 +39,41 @@ REPO_URL=https://git.example.com/you/homelab.git \
 * **Update later:** run the same command with `CTID=<dashboard CT id>`. It pulls the latest code into the
   existing container, re-runs `install.sh` (your config and key are kept) and restarts the service.
 
-Finish by editing the services in `/etc/updatedash/config.yaml` inside the container, then
-`systemctl restart updatedash`.
+Every container listed in `/etc/updatedash-gate.allow` on the host is **discovered automatically** and shown,
+whether it is up to date, stopped or has an update. Known apps are recognised by hostname (Sonarr, Radarr,
+Prowlarr, Lidarr, Jackett, autobrr, Vaultwarden, Flaresolverr, Homarr, Heimdall, Traefik, Nginx Proxy Manager,
+Jellyfin, Plex, Tailscale, cloudflared). Other containers still show their OS package updates and can be
+OS-upgraded. You only need `services:` in `/etc/updatedash/config.yaml` to override a preset or add checks for
+an app it doesn't know (matched by CT ID).
+
+## Adding and removing containers
+
+**From the web UI:** click **Manage containers**, then tick or untick a container. Ticking adds its CT ID to the
+host's allow list and checks it straight away.
+
+**From the terminal (optional, good for automation):** the allow list is just a file on the Proxmox host,
+`/etc/updatedash-gate.allow`, one CT ID per line. Edit it by hand or script it; the dashboard picks changes up on
+the next check. Both methods edit the same file.
+
+### Security model (what a compromised dashboard can and can't do)
+* The dashboard's SSH key only runs the gate (`updatedash-gate`), locked to the dashboard's IP. It can only
+  `pct exec`/snapshot containers listed in the allow file, plus read-only `pct list`. It never gets a host shell.
+* Web-UI management is switched on by the file `/etc/updatedash-gate.manage` on the host. With it on, someone who
+  gets into the dashboard could add *other* containers to the allow list. Two limits stay in force:
+  * CT IDs in `/etc/updatedash-gate.protected` (put Tailscale, your password manager and reverse proxies here)
+    can **never** be added or removed through the dashboard, and the dashboard's own container can't be added.
+  * Only containers that exist can be added; nothing else about the host can be changed.
+* To turn web-UI management off: `rm /etc/updatedash-gate.manage` on the host (or re-run the builder with
+  `GUI_MANAGE=0`). The allow list is then hand-edited only. Protected IDs are edited only by hand.
+* Every update takes a snapshot first, the login uses basic auth (use it behind HTTPS), and POSTs need a custom
+  header to block cross-site requests.
+
+## Versions and release notes
+Each row shows the installed version, and when an update exists, `→ newer version ↗`. The link opens the release
+notes or changelog (GitHub release page for GitHub-hosted apps; Jellyfin, Plex, Tailscale and cloudflared link to their
+changelogs; set `link:` in a config override for anything else). The update confirmation shows
+`installed → new` with the release notes preview for GitHub apps. "unknown" installed means the preset couldn't
+read the version; hover it for the command that was tried.
 
 ### Manual deploy (no script)
 1. Create a Debian 13 LXC, copy this folder in (`pct push`), and run `bash updatedash/install.sh`.
@@ -54,12 +87,13 @@ Finish by editing the services in `/etc/updatedash/config.yaml` inside the conta
 3. Edit `/etc/updatedash/config.yaml` and restart the service.
 
 ## Find the version file for community-script apps
-Many community-script containers record the installed version in a file. Find it with:
+Community-script apps record the installed release in `/root/.<appname>` (lowercase), older ones in
+`/opt/*_version.txt`. The presets read those. Check one with:
 ```
-pct exec <CTID> -- sh -c 'ls /opt/*_version.txt /opt/*/version* ~/.*version* 2>/dev/null; cat /opt/*_version.txt 2>/dev/null'
+pct exec <CTID> -- sh -c 'ls -A /root | grep "^\\."; ls /opt/*_version.txt 2>/dev/null'
 ```
-Put the matching `cat <file>` in `current:`. A service with no readable version shows "Unknown", but you can
-still use "Update anyway".
+If a preset can't read the version it shows "Version unknown"; add an override in `services:` with the right
+`current:` command. You can still use "Update anyway".
 
 ## Notes
 * Check the first update on a non-critical container (Sonarr), not Vaultwarden.

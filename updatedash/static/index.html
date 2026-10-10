@@ -13,7 +13,11 @@
       <h1>Updates</h1>
       <p id="sub" class="muted">Loading…</p>
     </div>
-    <button id="checkAll" class="btn">Check all</button>
+    <div class="toolbar">
+      <label class="toggle"><input type="checkbox" id="onlyAction"> Only show items needing action</label>
+      <button id="manageBtn" class="btn">Manage containers</button>
+      <button id="checkAll" class="btn">Check all</button>
+    </div>
   </header>
 
   <section id="chips" class="chips" aria-live="polite"></section>
@@ -48,11 +52,22 @@
   <form method="dialog">
     <h2 id="confirmTitle"></h2>
     <p id="confirmBody" class="muted"></p>
+    <div id="confirmExtra"></div>
     <div class="dialogbtns">
       <button value="cancel" class="btn ghost">Cancel</button>
       <button id="confirmOk" value="ok" class="btn primary">Update</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="manage" class="wide">
+  <div class="managehead">
+    <h2>Manage containers</h2>
+    <button id="manageClose" class="btn small ghost" type="button">Close</button>
+  </div>
+  <p id="manageMsg" class="muted"></p>
+  <input id="manageFilter" class="search" type="search" placeholder="Filter by name or CT ID" autocomplete="off">
+  <ul id="manageList" class="managelist"></ul>
 </dialog>
 
 <script src="/static/app.js"></script>

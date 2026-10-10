@@ -20,6 +20,11 @@
 #   ALLOW_CTIDS   space-separated CT IDs the dashboard may manage [prompted]
 #   ASSUME_YES=1  don't ask before changing host files
 #   SETUP_GATE=1  with CTID=<existing>: also (re)do the host-side gate setup
+#   GUI_MANAGE    [1] let the dashboard add/remove CT IDs from its web UI. 0 turns that off and
+#                 removes /etc/updatedash-gate.manage (the allow list is then edited by hand only).
+#   PROTECTED_CTIDS  CT IDs the dashboard may NEVER add or remove, even with GUI_MANAGE=1
+#                 (e.g. Tailscale, password manager, reverse proxies). Written to
+#                 /etc/updatedash-gate.protected; they can only be changed by editing the allow file by hand.
 set -Eeuo pipefail
 trap 'printf "\033[1;31mxx\033[0m failed on line %s\n" "$LINENO" >&2' ERR
 
@@ -38,10 +43,13 @@ CORES="${CORES:-1}"; RAM="${RAM:-256}"; DISK="${DISK:-2}"; BRIDGE="${BRIDGE:-vmb
 IP="${IP:-dhcp}"; GW="${GW:-}"
 STORAGE="${STORAGE:-}"; TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-}"
 PVE_HOST="${PVE_HOST:-}"; ALLOW_CTIDS="${ALLOW_CTIDS:-}"; ASSUME_YES="${ASSUME_YES:-0}"; SETUP_GATE="${SETUP_GATE:-0}"
+GUI_MANAGE="${GUI_MANAGE:-1}"; PROTECTED_CTIDS="${PROTECTED_CTIDS-__unset__}"
 SRC_DIR=/root/updatedash-src
 GATE_BIN="${GATE_BIN:-/usr/local/sbin/updatedash-gate}"
 ALLOW_FILE="${ALLOW_FILE:-/etc/updatedash-gate.allow}"
 AUTH_KEYS="${AUTH_KEYS:-/root/.ssh/authorized_keys}"
+MANAGE_FLAG="${MANAGE_FLAG:-/etc/updatedash-gate.manage}"
+PROTECTED_FILE="${PROTECTED_FILE:-/etc/updatedash-gate.protected}"
 
 if [ -z "$REPO_URL" ]; then
   tty_ok || die "Set REPO_URL (git URL or a local repo path on this host)."
@@ -126,8 +134,17 @@ setup_gate() {
 
   if [ -z "$ALLOW_CTIDS" ] && tty_ok; then
     echo; pct list; echo
-    read -rp "CT IDs the dashboard may update (space separated, e.g. 110 111 112): " ALLOW_CTIDS
+    if [ "$GUI_MANAGE" = 1 ]; then
+      read -rp "CT IDs the dashboard may update (space separated; blank = add them later in the web UI): " ALLOW_CTIDS
+    else
+      read -rp "CT IDs the dashboard may update (space separated, e.g. 110 111 112): " ALLOW_CTIDS
+    fi
   fi
+  if [ "$GUI_MANAGE" = 1 ] && [ "$PROTECTED_CTIDS" = __unset__ ] && tty_ok; then
+    read -rp "Protected CT IDs the web UI may never add/remove (e.g. Tailscale, Vaultwarden, proxies; blank = none): " PROTECTED_CTIDS
+  fi
+  [ "$PROTECTED_CTIDS" != __unset__ ] || PROTECTED_CTIDS=""
+  PROTECTED_CTIDS="${PROTECTED_CTIDS//[^0-9]/ }"
   local id ids=()
   ALLOW_CTIDS="${ALLOW_CTIDS//[^0-9]/ }"   # accept "106, 114" or "106 114." etc.
   for id in $ALLOW_CTIDS; do
@@ -142,6 +159,12 @@ setup_gate() {
   msg "About to change this Proxmox host:"
   echo "   - install ${GATE_BIN} (restricts the key to pct exec/snapshot)"
   echo "   - allow CT IDs: ${ids[*]:-<none yet>}   (${ALLOW_FILE})"
+  if [ "$GUI_MANAGE" = 1 ]; then
+    echo "   - turn ON web-UI management of that list (${MANAGE_FLAG}); protected IDs: ${PROTECTED_CTIDS:-<none>}"
+    echo "     NOTE: with this on, anyone who gets into the dashboard can add other containers (except protected ones)."
+  else
+    echo "   - web-UI management of the list stays OFF (edit ${ALLOW_FILE} by hand)"
+  fi
   echo "   - add this line to ${AUTH_KEYS}:"
   echo "     ${entry:0:150}..."
   if [ "$ASSUME_YES" != 1 ]; then
@@ -154,6 +177,16 @@ setup_gate() {
   chmod 755 "$GATE_BIN"
   touch "$ALLOW_FILE"
   for id in "${ids[@]}"; do grep -qx "$id" "$ALLOW_FILE" || echo "$id" >> "$ALLOW_FILE"; done
+  if [ "$GUI_MANAGE" = 1 ]; then
+    echo "$CTID" > "$MANAGE_FLAG"
+    if [ -n "${PROTECTED_CTIDS// /}" ]; then
+      { echo "# CT IDs the dashboard can never add or remove"; for id in $PROTECTED_CTIDS; do echo "$id"; done; } > "$PROTECTED_FILE"
+    else
+      : > "$PROTECTED_FILE"
+    fi
+  else
+    rm -f "$MANAGE_FLAG"
+  fi
   mkdir -p "$(dirname "$AUTH_KEYS")"; touch "$AUTH_KEYS"
   grep -qF "$keyblob" "$AUTH_KEYS" || echo "$entry" >> "$AUTH_KEYS"
   msg "Gate installed."
