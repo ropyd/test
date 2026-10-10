@@ -16,6 +16,7 @@ import mimetypes
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -36,9 +37,9 @@ STATE_DIR = Path(os.environ.get("UPDATEDASH_STATE", "/var/lib/updatedash"))
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
 SNAP_RE = re.compile(r"pre-update-\d{8}-\d{6}")
 
-# Community-scripts containers ship an interactive `update` command (a whiptail menu).
-# Run it inside a pty and press Enter on the default choice ("YES (Silent Mode)").
-COMMUNITY_UPDATE = r"export TERM=xterm; (sleep 5; printf '\n') | script -qec update /dev/null"
+# Community-scripts containers ship an `update` command. PHS_SILENT=1 is its supported unattended mode: it
+# skips the whiptail menu and runs the silent update (it does the same when there is no terminal).
+COMMUNITY_UPDATE = "export PHS_SILENT=1 TERM=dumb; update"
 APT_ENV = "export DEBIAN_FRONTEND=noninteractive;"
 OS_UPGRADE = APT_ENV + " apt-get update -qq && apt-get -y -o Dpkg::Options::=--force-confold upgrade"
 
@@ -117,18 +118,29 @@ def load_config():
 
 # ---------------------------------------------------------------- command running
 
-def run_argv(argv, timeout, on_line=None):
-    """Run argv, stream cleaned output lines, return (rc, [lines])."""
+def kill_tree(p):
+    """Kill a child and everything it started (they share a process group)."""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        p.kill()
+
+
+def run_argv(argv, timeout, on_line=None, holder=None):
+    """Run argv, stream cleaned output lines, return (rc, [lines]). holder['p'] gets the Popen (for cancel)."""
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, errors="replace")
+                             stderr=subprocess.STDOUT, text=True, errors="replace",
+                             start_new_session=True)
     except OSError as e:
         return 127, [str(e)]
+    if holder is not None:
+        holder["p"] = p
     fired = threading.Event()
 
     def kill():
         fired.set()
-        p.kill()
+        kill_tree(p)
 
     timer = threading.Timer(timeout, kill)
     timer.start()
@@ -168,11 +180,11 @@ class Runner:
                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8",
                 "-o", "ServerAliveInterval=15", f"{self.user}@{self.host}", remote]
 
-    def exec(self, ctid, cmd, timeout=60, on_line=None):
+    def exec(self, ctid, cmd, timeout=60, on_line=None, holder=None):
         if self.local:
-            return run_argv(["bash", "-c", cmd], timeout, on_line)
+            return run_argv(["bash", "-c", cmd], timeout, on_line, holder)
         remote = shlex.join(["pct", "exec", str(ctid), "--", "bash", "-c", cmd])
-        return run_argv(self._ssh(remote), timeout, on_line)
+        return run_argv(self._ssh(remote), timeout, on_line, holder)
 
     # -- local transport test hooks: UPDATEDASH_FAKE_LIST is a `pct list` dump; the allow list is a JSON file
     def _local_allow(self):
@@ -460,13 +472,25 @@ class Dash:
                 raise ValueError("an update is already running for this container")
             jid = uuid.uuid4().hex[:12]
             self.jobs[jid] = {"id": jid, "service": svc["name"], "kind": kind, "status": "running",
-                              "lines": [], "started": time.time(), "ended": None}
+                              "lines": [], "started": time.time(), "ended": None,
+                              "holder": {}, "cancelled": False}
             self.state[ctid]["job"] = jid
             for old in sorted(self.jobs.values(), key=lambda j: j["started"])[:-40]:
                 if old["status"] != "running":
                     self.jobs.pop(old["id"], None)
         threading.Thread(target=self._run_update, args=(self.jobs[jid], svc, kind), daemon=True).start()
         return jid
+
+    def cancel(self, ctid):
+        with self.lock:
+            jid = self.state[ctid]["job"]
+            job = self.jobs.get(jid) if jid else None
+            if not job or job["status"] != "running":
+                raise ValueError("nothing is running for this container")
+            job["cancelled"] = True
+            p = job["holder"].get("p")
+        if p:
+            kill_tree(p)
 
     def _update_command(self, svc, kind):
         if kind == "os":
@@ -493,7 +517,11 @@ class Dash:
                 log("Snapshot created.")
             cmd = self._update_command(svc, kind)
             log(f"$ {cmd}")
-            rc, _ = self.runner.exec(ctid, cmd, int(svc.get("update_timeout", 1800)), log)
+            rc, _ = self.runner.exec(ctid, cmd, int(svc.get("update_timeout", 1800)), log, job["holder"])
+            if job["cancelled"]:
+                log("Cancelled. The SSH session was closed, but a command already started inside the container "
+                    "may still be running (check with `pct exec " + str(ctid) + " -- ps aux`).")
+                return
             log(f"Finished with exit code {rc}")
             ok = rc == 0
             if ok:
@@ -637,6 +665,14 @@ def make_handler(dash):
             if self.path == "/api/check":
                 dash.check_async(ctid)
                 return self._send(202, {"ok": True})
+            if self.path == "/api/cancel":
+                if ctid is None:
+                    return self._send(400, {"error": "bad container"})
+                try:
+                    dash.cancel(ctid)
+                    return self._send(202, {"ok": True})
+                except ValueError as e:
+                    return self._send(409, {"error": str(e)})
             if self.path == "/api/update":
                 kind = body.get("kind", "app")
                 if ctid is None or kind not in ("app", "os"):

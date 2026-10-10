@@ -97,9 +97,7 @@ If a preset can't read the version it shows "Version unknown"; add an override i
 
 ## Notes
 * Check the first update on a non-critical container (Sonarr), not Vaultwarden.
-* The community `update` menu is interactive. updatedash runs it in a pty and presses Enter on the default
-  item. If a particular app hangs, set `update:` for it to a command that works non-interactively. Jobs are
-  killed after `update_timeout` (default 1800 s).
+* Community-script apps are updated with their own `update` command in its supported unattended mode (`PHS_SILENT=1`). A running update can be stopped with **Cancel**; if a command had already started inside the container it may keep running, so check it with `pct exec <CTID> -- ps aux`.
 * A snapshot `pre-update-YYYYMMDD-HHMMSS` is taken before each update, and old ones are pruned after a
   successful update. Roll back with `pct rollback <CTID> <snapshot>`.
 * Put it behind NPM (`http` → dashboard IP : 8099) with your wildcard cert, and don't expose it publicly.

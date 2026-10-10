@@ -185,6 +185,9 @@
           disabled: s.running || s.status === 'error',
           onclick: () => startUpdate(s, 'app'),
           text: s.status === 'update' ? 'Update' : 'Update anyway' }) : null,
+        s.running ? el('button', { class: 'btn small',
+          onclick: () => post('/api/cancel', { ctid: s.ctid }).then(refresh).catch((e) => showError(e.message)),
+          text: 'Cancel' }) : null,
         s.job ? el('button', { class: 'btn small ghost',
           onclick: () => watch(s.job, `${s.name} (CT ${s.ctid}) last job`), text: 'Log' }) : null);
       const instCell = s.installed ? el('td', { class: 'ver', text: s.installed })
