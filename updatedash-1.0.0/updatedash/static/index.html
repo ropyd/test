@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Update Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<a class="skip" href="#rows">Skip to the list</a>
+<main>
+  <header class="top">
+    <div>
+      <h1>Updates</h1>
+      <p id="sub" class="muted">Loading…</p>
+    </div>
+    <div class="toolbar">
+      <input id="search" class="search small" type="search" placeholder="Search ( / )" aria-label="Search containers" autocomplete="off">
+      <select id="sort" class="select" aria-label="Sort order">
+        <option value="action">Needs action first</option>
+        <option value="id">By ID</option>
+        <option value="name">By name</option>
+      </select>
+      <label class="toggle"><input type="checkbox" id="onlyAction"> Needs action only</label>
+      <button id="manageBtn" class="btn" type="button">Manage containers</button>
+      <button id="checkAll" class="btn" type="button">Check all</button>
+      <button id="settingsBtn" class="btn" type="button">Settings</button>
+      <button id="signOut" class="btn ghost" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+  <section id="chips" class="chips" aria-live="polite"></section>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Container</th>
+          <th scope="col">Installed</th>
+          <th scope="col">Available</th>
+          <th scope="col">Status</th>
+          <th scope="col">OS packages</th>
+          <th scope="col" class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <section id="logpanel" class="logpanel" hidden aria-label="Update log">
+    <div class="loghead">
+      <strong id="logtitle"></strong>
+      <span id="logstatus" class="badge"></span>
+      <button id="logcopy" class="btn small ghost" type="button">Copy log</button>
+      <button id="logclose" class="btn small ghost" type="button">Hide</button>
+    </div>
+    <pre id="log" tabindex="0"></pre>
+  </section>
+</main>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+<dialog id="confirm" aria-labelledby="confirmTitle">
+  <form method="dialog">
+    <h2 id="confirmTitle"></h2>
+    <p id="confirmBody" class="muted"></p>
+    <div id="confirmExtra"></div>
+    <div class="dialogbtns">
+      <button value="cancel" class="btn ghost">Cancel</button>
+      <button id="confirmOk" value="ok" class="btn primary">Update</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="manage" class="wide" aria-labelledby="manageTitle">
+  <div class="dhead"><h2 id="manageTitle">Manage containers</h2>
+    <button id="manageClose" class="btn small ghost" type="button">Close</button></div>
+  <p id="manageMsg" class="muted"></p>
+  <input id="manageFilter" class="search" type="search" placeholder="Filter by name or CT ID" aria-label="Filter containers" autocomplete="off">
+  <ul id="manageList" class="managelist"></ul>
+  <div class="dialogbtns split">
+    <span class="muted">Not a Proxmox container, or no Proxmox access?</span>
+    <button id="addHostBtn" class="btn" type="button">Add a host by SSH…</button>
+  </div>
+</dialog>
+
+<dialog id="access" class="wide" aria-labelledby="accessTitle">
+  <form id="accessForm" novalidate>
+    <div class="dhead"><h2 id="accessTitle">Access</h2>
+      <button id="accessClose" class="btn small ghost" type="button">Close</button></div>
+    <p id="accessIntro" class="muted"></p>
+    <div id="accessNameRow" class="field" hidden>
+      <label for="aName">Name</label>
+      <input id="aName" type="text" maxlength="40" autocomplete="off" placeholder="e.g. docker-vm">
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="aHost">Host or IP</label>
+        <input id="aHost" type="text" autocomplete="off" spellcheck="false" placeholder="10.10.56.20"></div>
+      <div class="field narrow"><label for="aPort">Port</label>
+        <input id="aPort" type="number" min="1" max="65535" value="22"></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="aUser">Username</label>
+        <input id="aUser" type="text" autocomplete="off" spellcheck="false" value="root"></div>
+      <div class="field"><label for="aAuth">Sign in with</label>
+        <select id="aAuth" class="select full"><option value="password">Password</option><option value="key">SSH private key</option></select></div>
+    </div>
+    <div id="aPwRow" class="field"><label for="aSecret">Password</label>
+      <input id="aSecret" type="password" autocomplete="new-password" placeholder=""></div>
+    <div id="aKeyRow" class="field" hidden>
+      <label for="aKey">Private key</label>
+      <textarea id="aKey" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+      <div class="inline"><label class="filebtn btn small ghost" for="aKeyFile">Load from file…</label>
+        <input id="aKeyFile" type="file" class="offscreen">
+        <span class="muted">Stays in your browser until you save.</span></div>
+      <label for="aPass">Key passphrase (if it has one)</label>
+      <input id="aPass" type="password" autocomplete="new-password">
+    </div>
+    <p id="aSavedNote" class="muted" hidden></p>
+    <label class="check"><input id="aSudo" type="checkbox"> Use sudo (passwordless) — for a non-root user</label>
+    <label class="check"><input id="aForget" type="checkbox"> Forget the saved host key (tick if the server was rebuilt)</label>
+    <div id="accessResult" class="result" role="status" aria-live="polite" hidden></div>
+    <div class="dialogbtns split">
+      <button id="accessRemove" class="btn danger" type="button" hidden>Remove credentials</button>
+      <span class="grow"></span>
+      <button id="accessTest" class="btn" type="button">Test connection</button>
+      <button id="accessSave" class="btn primary" type="submit">Save</button>
+    </div>
+    <p class="fine">Credentials are encrypted on the dashboard and never shown again. The first connection to a host trusts
+      its SSH key and remembers it; a changed key is refused.</p>
+  </form>
+</dialog>
+
+<dialog id="history" class="wide" aria-labelledby="historyTitle">
+  <div class="dhead"><h2 id="historyTitle">Update logs</h2>
+    <button id="historyClose" class="btn small ghost" type="button">Close</button></div>
+  <p id="historyNote" class="muted"></p>
+  <ul id="historyList" class="managelist"></ul>
+</dialog>
+
+<dialog id="settings" class="wide" aria-labelledby="settingsTitle">
+  <div class="dhead"><h2 id="settingsTitle">Settings</h2>
+    <button id="settingsClose" class="btn small ghost" type="button">Close</button></div>
+
+  <h3>Log retention</h3>
+  <p class="muted">How many update logs to keep <strong>for each container</strong>. Older ones are deleted. Set to 1 to keep only the latest.</p>
+  <div class="inline">
+    <label for="sRetention" class="offscreen">Logs to keep per container</label>
+    <input id="sRetention" type="number" min="1" max="200" class="num">
+    <button id="sRetentionSave" class="btn" type="button">Save</button>
+    <span id="sRetentionMsg" class="muted" role="status"></span>
+  </div>
+
+  <h3>Password</h3>
+  <form id="pwForm" class="stack" novalidate>
+    <label for="pwCur">Current password</label>
+    <input id="pwCur" type="password" autocomplete="current-password">
+    <label for="pwNew">New password (10+ characters)</label>
+    <input id="pwNew" type="password" autocomplete="new-password">
+    <label for="pwNew2">Repeat new password</label>
+    <input id="pwNew2" type="password" autocomplete="new-password">
+    <div class="inline"><button class="btn" type="submit">Change password</button><span id="pwMsg" class="muted" role="status"></span></div>
+  </form>
+
+  <h3>Recent activity</h3>
+  <ul id="auditList" class="audit"></ul>
+
+  <h3>About</h3>
+  <p id="aboutText" class="muted"></p>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

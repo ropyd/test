@@ -1,0 +1,53 @@
+# updatedash configuration  (installed to /etc/updatedash/config.yaml)
+
+listen: "0.0.0.0:8099"
+username: admin
+# Created by install.sh. To change it use Settings -> Password in the web UI, or put a new hash here:
+#   printf '%s' 'new-password' | python3 /opt/updatedash/app.py hash-password
+# (a plaintext `password:` also works but is discouraged)
+password_hash: "CHANGE-ME"
+session_hours: 12
+
+# Put the dashboard behind a reverse proxy with HTTPS (Nginx Proxy Manager, Traefik, ...) and list the proxy's
+# address here so client IPs, the Secure cookie flag and the lockout use the real values.
+trust_proxy: []                # e.g. ["10.10.31.16"]
+# Or serve HTTPS directly:
+# tls_cert: /etc/updatedash/tls.crt
+# tls_key: /etc/updatedash/tls.key
+
+transport: pve                 # pve = SSH to the Proxmox host gate (+ optional per-container SSH access)
+                               # local = run commands on this machine (testing only)
+pve:
+  host: 10.10.56.5             # your Proxmox host IP (leave out for SSH-only use)
+  user: root
+  key: /etc/updatedash/id_ed25519
+
+snapshot_before_update: true   # snapshot Proxmox containers first; abort if it fails
+keep_snapshots: 2              # keep the newest N pre-update snapshots per CT
+check_interval_minutes: 360
+max_parallel_updates: 2
+log_retention: 5               # default number of update logs kept per container; changeable in Settings
+github_token: ""               # optional; avoids GitHub's anonymous rate limit
+
+# Every container listed in /etc/updatedash-gate.allow on the Proxmox host is discovered and shown
+# automatically. Known apps (Sonarr, Radarr, Prowlarr, Jackett, autobrr, Vaultwarden, Jellyfin, Plex,
+# Traefik, NPM, Tailscale, ...) are recognised by hostname. Add or remove containers in the web UI
+# (Manage containers) or by editing that allow file.
+discover: true
+
+# OPTIONAL overrides, matched by CT ID. Use this for apps the presets don't know or get wrong.
+#   latest.type: apt      -> compares installed vs candidate version of one apt package
+#   latest.type: github   -> `current` (a command run inside the CT) vs the latest GitHub release
+#   latest.type: command  -> `current` vs the output of latest.cmd (run inside the CT)
+#   link: https://...        release notes / changelog page shown next to the version (https only)
+#   update:                  command to run for "Update" (default: apt-get --only-upgrade for apt,
+#                            otherwise the community-scripts `update` command in unattended mode)
+#   os_updates: false        hide the OS package count
+# Find the version file of a community-script app with:
+#   pct exec <CTID> -- sh -c 'ls -A /root | grep "^\."; ls /opt/*_version.txt 2>/dev/null'
+services: []
+#  - name: My app
+#    ctid: 120
+#    current: "cat /root/.myapp"
+#    latest: {type: github, repo: owner/repo}
+#    update: "/usr/local/bin/my-update.sh"
