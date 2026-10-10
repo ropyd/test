@@ -91,8 +91,7 @@ create_container() {
     --net0 "$net" --features nesting=1 --start 1
 
   msg "Waiting for the container network"
-  local i
-  for i in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 && return 0
     sleep 2
   done
@@ -219,6 +218,11 @@ pct exec "$CTID" -- systemctl restart updatedash
 echo
 msg "Done."
 echo "   Dashboard : http://${CT_IP}:8099   (CT $CTID)"
-echo "   Login     : admin / $(pct exec "$CTID" -- awk -F'"' '/^password:/ {print $2}' /etc/updatedash/config.yaml)"
+PLAIN_PW="$(pct exec "$CTID" -- awk -F'"' '/^password:/ {print $2}' /etc/updatedash/config.yaml 2>/dev/null || true)"
+if [ -n "$PLAIN_PW" ]; then
+  echo "   Login     : admin / $PLAIN_PW   (plaintext in the config; set a new one under Settings)"
+else
+  echo "   Login     : admin   (a new install prints its generated password once, above; otherwise use your existing one)"
+fi
 echo "   Next      : edit your services in the container: pct exec $CTID -- nano /etc/updatedash/config.yaml"
 echo "               then: pct exec $CTID -- systemctl restart updatedash"

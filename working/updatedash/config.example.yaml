@@ -1,0 +1,40 @@
+# updatedash configuration  (installed to /etc/updatedash/config.yaml)
+
+listen: "0.0.0.0:8099"
+username: admin
+password: "CHANGE-ME"          # install.sh generates a random one on first install
+
+transport: pve                 # pve = SSH to the Proxmox host, then `pct exec`
+                               # local = run commands on this machine (testing only)
+pve:
+  host: 10.10.56.5             # your Proxmox host IP
+  user: root
+  key: /etc/updatedash/id_ed25519
+
+snapshot_before_update: true   # take a `pre-update-*` snapshot of the CT first; abort if it fails
+keep_snapshots: 2              # keep the newest N pre-update snapshots per CT
+check_interval_minutes: 360
+github_token: ""               # optional; avoids GitHub's anonymous rate limit
+
+# Every container listed in /etc/updatedash-gate.allow on the Proxmox host is discovered and shown
+# automatically (running or stopped). Known apps (Sonarr, Radarr, Prowlarr, Jackett, autobrr,
+# Vaultwarden, Jellyfin, Plex, Traefik, NPM, Tailscale, ...) are recognised by hostname.
+# Containers with no preset still show their OS package updates, and can be OS-upgraded.
+discover: true
+
+# OPTIONAL overrides, matched by CT ID. Use this for apps the presets don't know or get wrong.
+#   latest.type: apt      -> compares installed vs candidate version of one apt package
+#   latest.type: github   -> `current` (a command run inside the CT) vs the latest GitHub release
+#   latest.type: command  -> `current` vs the output of latest.cmd (run inside the CT)
+#   link: https://...        release notes / changelog page shown next to the version (https only)
+#   update:                  command to run for "Update" (default: apt-get --only-upgrade for apt,
+#                            otherwise the community-scripts `update` command)
+#   os_updates: false        hide the OS package count
+# Find the version file of a community-script app with:
+#   pct exec <CTID> -- sh -c 'ls -A /root | grep "^\."; ls /opt/*_version.txt 2>/dev/null'
+services: []
+#  - name: My app
+#    ctid: 120
+#    current: "cat /root/.myapp"
+#    latest: {type: github, repo: owner/repo}
+#    update: "/usr/local/bin/my-update.sh"
