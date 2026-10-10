@@ -1,4 +1,5 @@
 """Persistent state: encrypted credentials, per-container access, update logs, audit trail, settings."""
+import hashlib
 import json
 import logging
 import os
@@ -10,7 +11,22 @@ from pathlib import Path
 from .util import atomic_write, read_json
 
 log = logging.getLogger("updatedash")
-CUSTOM_BASE = 10_000_000            # CT ids >= this are non-Proxmox hosts added by SSH
+CUSTOM_BASE = 10_000_000            # CT ids >= this (and below HOST_STRIDE) are non-Proxmox hosts added by SSH
+HOST_STRIDE = 10 ** 9               # a container's id is host_index * HOST_STRIDE + its CT number (host 0 = plain CT number)
+MAX_HOSTS = 8
+
+
+def make_uid(hidx, ctid):
+    return int(hidx) * HOST_STRIDE + int(ctid)
+
+
+def split_uid(uid):
+    """(host index, CT number on that host)."""
+    return divmod(int(uid), HOST_STRIDE)
+
+
+def is_custom_uid(uid):
+    return CUSTOM_BASE <= int(uid) < HOST_STRIDE
 MAX_LOG_LINES = 5000
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,252}$")
 USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
@@ -304,16 +320,76 @@ class LogStore:
 
 
 # ---------------------------------------------------------------- audit
+GENESIS = "0" * 64
+
+
+def _chain_hash(rec):
+    body = {k: v for k, v in rec.items() if k != "h"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 class Audit:
+    """Append-only JSON lines. Each record carries the hash of the previous one, so editing or deleting a record in
+    the middle is detectable. The same events also go to the system journal; a copy off the box (remote syslog)
+    is what makes the trail trustworthy if the dashboard itself is compromised."""
+
     def __init__(self, path, max_bytes=1_000_000, keep=3):
         self.path = Path(path)
         self.max_bytes = max_bytes
         self.keep = keep
         self.lock = threading.Lock()
+        self._last = GENESIS
+        for p in (self.path, self.path.with_name(self.path.name + ".1")):
+            last = self._last_hash_in(p)
+            if last:
+                self._last = last
+                break
+
+    @staticmethod
+    def _last_hash_in(p):
+        try:
+            with open(p) as f:
+                for ln in reversed(f.readlines()):
+                    try:
+                        h = json.loads(ln).get("h")
+                    except ValueError:
+                        continue
+                    if h:
+                        return h
+        except OSError:
+            pass
+        return None
+
+    def _files_oldest_first(self):
+        files = [self.path.with_name(f"{self.path.name}.{i}") for i in range(self.keep, 0, -1)] + [self.path]
+        return [p for p in files if p.exists()]
+
+    def verify(self):
+        """(ok, index of the first record that breaks the chain or None). Records from before chaining are skipped."""
+        prev, n = None, 0
+        for p in self._files_oldest_first():
+            try:
+                lines = p.read_text().splitlines()
+            except OSError:
+                continue
+            for ln in lines:
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    return False, n
+                if "h" not in rec:
+                    continue
+                if rec["h"] != _chain_hash(rec) or (prev is not None and rec.get("p") != prev):
+                    return False, n
+                prev, n = rec["h"], n + 1
+        return True, None
 
     def append(self, actor, ip, action, detail=""):
         rec = {"t": int(time.time()), "user": actor, "ip": ip, "action": action, "detail": str(detail)[:300]}
         with self.lock:
+            rec["p"] = self._last
+            rec["h"] = _chain_hash(rec)
+            self._last = rec["h"]
             self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 if self.path.exists() and self.path.stat().st_size > self.max_bytes:
@@ -332,7 +408,7 @@ class Audit:
     def tail(self, n=50):
         """Newest first. Files are read oldest to newest so events from the same second keep their order."""
         rows = []
-        for p in (self.path.with_name(self.path.name + ".1"), self.path):
+        for p in self._files_oldest_first():
             try:
                 with open(p) as f:
                     for ln in f:
@@ -343,3 +419,73 @@ class Audit:
             except OSError:
                 pass
         return list(reversed(rows))[:n]
+
+
+# ---------------------------------------------------------------- Proxmox hosts
+class HostRegistry:
+    """The Proxmox nodes the dashboard talks to. Index 0 comes from the `pve:` block of the config (it may be empty
+    for SSH-only use); further, independent nodes are added in the UI and kept in hosts.json. Indexes are never reused,
+    so a removed node's logs and ids can't be confused with a later one."""
+
+    def __init__(self, path, primary):
+        self.path = Path(path) if path else None
+        self.lock = threading.RLock()
+        self.primary = dict(primary or {})
+        data = read_json(self.path, {}) if self.path else {}
+        data = data if isinstance(data, dict) else {}
+        self.extra = [h for h in data.get("hosts", []) if isinstance(h, dict) and 1 <= int(h.get("idx", 0)) < MAX_HOSTS]
+        self.next_idx = max([int(data.get("next_idx", 1))] + [int(h["idx"]) + 1 for h in self.extra])
+
+    def _save(self):
+        if self.path:
+            atomic_write(self.path, json.dumps({"next_idx": self.next_idx, "hosts": self.extra}, indent=1), 0o600)
+
+    def all(self):
+        with self.lock:
+            p = self.primary
+            first = {"idx": 0, "name": p.get("name") or "proxmox", "host": p.get("host") or "",
+                     "user": p.get("user") or "root", "primary": True}
+            return [first] + [dict(h, primary=False) for h in sorted(self.extra, key=lambda h: h["idx"])]
+
+    def get(self, idx):
+        for h in self.all():
+            if h["idx"] == int(idx):
+                return h
+        return None
+
+    def by_name(self, name):
+        for h in self.all():
+            if h["name"].lower() == str(name).lower():
+                return h
+        return None
+
+    def add(self, name, host, user="root"):
+        name, host, user = str(name or "").strip(), str(host or "").strip(), str(user or "root").strip()
+        if not NAME_RE.match(name):
+            raise ValidationError("name must be 1-40 letters, numbers, spaces, dots, dashes")
+        if not HOST_RE.match(host):
+            raise ValidationError("host must be a hostname or IP address")
+        if not USER_RE.match(user):
+            raise ValidationError("user name has unsupported characters")
+        with self.lock:
+            if len(self.all()) >= MAX_HOSTS or self.next_idx >= MAX_HOSTS:
+                raise ValidationError(f"at most {MAX_HOSTS} Proxmox hosts are supported")
+            for h in self.all():
+                if h["name"].lower() == name.lower():
+                    raise ValidationError("a host with that name already exists")
+                if h["host"] and h["host"].lower() == host.lower():
+                    raise ValidationError("that address is already configured")
+            idx = self.next_idx
+            self.next_idx += 1
+            self.extra.append({"idx": idx, "name": name, "host": host, "user": user})
+            self._save()
+            return idx
+
+    def remove(self, idx):
+        with self.lock:
+            n = len(self.extra)
+            self.extra = [h for h in self.extra if h["idx"] != int(idx)]
+            if len(self.extra) != n:
+                self._save()
+                return True
+            return False

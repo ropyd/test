@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -32,6 +33,15 @@ def read_json(path, default):
             return json.loads(f.read().decode() or "null")
     except (OSError, ValueError):
         return default
+
+
+def find_tool(name):
+    """Absolute path of a helper binary, resolved once (so a later change to PATH can't swap it)."""
+    for d in ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"):
+        p = os.path.join(d, name)
+        if os.access(p, os.X_OK):
+            return p
+    return shutil.which(name) or name
 
 
 def safe_link(u):

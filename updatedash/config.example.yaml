@@ -8,10 +8,20 @@ username: admin
 password_hash: "CHANGE-ME"
 session_hours: 12
 
+# Serve HTTPS directly with a generated self-signed certificate (recommended; install.sh turns this on for new
+# installs). Put extra DNS names or IPs for the certificate in tls_names. Use tls_cert/tls_key for your own certificate.
+tls: auto
+tls_names: []
+session_idle_minutes: 480      # sign out after this long without activity (sessions also end after session_hours)
+
+# Only these addresses may reach the dashboard at all (everyone else gets 403 before the login page). Recommended:
+# your admin LAN/VPN, e.g. ["10.10.0.0/16", "100.64.0.0/10"]. With a reverse proxy, list the CLIENT networks and
+# set trust_proxy so the real client address is used.
+allow_from: []
+
 # Put the dashboard behind a reverse proxy with HTTPS (Nginx Proxy Manager, Traefik, ...) and list the proxy's
 # address here so client IPs, the Secure cookie flag and the lockout use the real values.
 trust_proxy: []                # e.g. ["10.10.31.16"]
-# Or serve HTTPS directly:
 # tls_cert: /etc/updatedash/tls.crt
 # tls_key: /etc/updatedash/tls.key
 
@@ -19,7 +29,7 @@ transport: pve                 # pve = SSH to the Proxmox host gate (+ optional 
                                # local = run commands on this machine (testing only)
 pve:
   host: 10.10.56.5             # your Proxmox host IP (leave out for SSH-only use)
-  user: root
+  user: updatedash-gate        # unprivileged host account that may only run the gate through sudo (builder creates it)
   key: /etc/updatedash/id_ed25519
 
 snapshot_before_update: true   # snapshot Proxmox containers first; abort if it fails

@@ -1,0 +1,52 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pyyaml cryptography
+      - name: Unit and integration tests (includes a real sshd on localhost)
+        working-directory: updatedash
+        run: python -m unittest discover -s tests -t . -v
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install bandit pip-audit pyyaml cryptography
+      - name: Static analysis (fails on medium or higher)
+        run: bandit -q -r updatedash/app.py updatedash/udash updatedash/pve-gate.py -ll
+      - name: Known-vulnerable dependencies
+        run: pip-audit
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax and shellcheck
+        run: |
+          for f in ct/updatedash.sh updatedash/install.sh updatedash/uninstall.sh updatedash/askpass.sh; do bash -n "$f"; done
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning ct/updatedash.sh updatedash/install.sh updatedash/uninstall.sh updatedash/askpass.sh
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pyyaml cryptography playwright
+      - run: playwright install --with-deps chromium
+      - name: Browser smoke test (pages load without script errors, dialogs work, phone width has no sideways scroll)
+        working-directory: updatedash
+        run: python tests/ui_smoke.py

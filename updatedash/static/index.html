@@ -5,24 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Update Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%277%27 fill=%27%232f5bea%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/theme.css" id="themeCss">
 </head>
 <body>
 <a class="skip" href="#rows">Skip to the list</a>
 <main>
-  <header class="top">
+  <header class="top panel">
     <div>
       <h1>Updates</h1>
       <p id="sub" class="muted">Loading…</p>
     </div>
     <div class="toolbar">
       <input id="search" class="search small" type="search" placeholder="Search ( / )" aria-label="Search containers" autocomplete="off">
+      <select id="hostFilter" class="select" aria-label="Show host" hidden></select>
       <select id="sort" class="select" aria-label="Sort order">
         <option value="action">Needs action first</option>
         <option value="id">By ID</option>
         <option value="name">By name</option>
       </select>
       <label class="toggle"><input type="checkbox" id="onlyAction"> Needs action only</label>
+      <button id="installBtn" class="btn" type="button">Install apps</button>
       <button id="manageBtn" class="btn" type="button">Manage containers</button>
       <button id="checkAll" class="btn" type="button">Check all</button>
       <button id="settingsBtn" class="btn" type="button">Settings</button>
@@ -38,10 +42,8 @@
       <thead>
         <tr>
           <th scope="col">Container</th>
-          <th scope="col">Installed</th>
-          <th scope="col">Available</th>
-          <th scope="col">Status</th>
-          <th scope="col">OS packages</th>
+          <th scope="col">Application</th>
+          <th scope="col">System</th>
           <th scope="col" class="right">Actions</th>
         </tr>
       </thead>
@@ -62,7 +64,7 @@
 
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
-<dialog id="confirm" aria-labelledby="confirmTitle">
+<dialog id="confirm" class="wide" aria-labelledby="confirmTitle">
   <form method="dialog">
     <h2 id="confirmTitle"></h2>
     <p id="confirmBody" class="muted"></p>
@@ -77,6 +79,8 @@
 <dialog id="manage" class="wide" aria-labelledby="manageTitle">
   <div class="dhead"><h2 id="manageTitle">Manage containers</h2>
     <button id="manageClose" class="btn small ghost" type="button">Close</button></div>
+  <div class="inline"><label for="manageHost" id="manageHostLabel" hidden>Proxmox host</label>
+    <select id="manageHost" class="select" hidden></select></div>
   <p id="manageMsg" class="muted"></p>
   <input id="manageFilter" class="search" type="search" placeholder="Filter by name or CT ID" aria-label="Filter containers" autocomplete="off">
   <ul id="manageList" class="managelist"></ul>
@@ -101,6 +105,13 @@
       <div class="field narrow"><label for="aPort">Port</label>
         <input id="aPort" type="number" min="1" max="65535" value="22"></div>
     </div>
+    <div class="field" id="hostKeyRow">
+      <div class="inline"><button id="hostKeyBtn" class="btn small" type="button">Check host key</button>
+        <span id="hostKeyState" class="muted" role="status"></span></div>
+      <div id="hostKeyList"></div>
+      <label class="check" id="hostKeyConfirmRow" hidden><input id="aTrust" type="checkbox">
+        <span>I compared this fingerprint with the one on the server (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>) and it matches</span></label>
+    </div>
     <div class="grid2">
       <div class="field"><label for="aUser">Username</label>
         <input id="aUser" type="text" autocomplete="off" spellcheck="false" value="root"></div>
@@ -120,7 +131,7 @@
     </div>
     <p id="aSavedNote" class="muted" hidden></p>
     <label class="check"><input id="aSudo" type="checkbox"> Use sudo (passwordless) — for a non-root user</label>
-    <label class="check"><input id="aForget" type="checkbox"> Forget the saved host key (tick if the server was rebuilt)</label>
+    <label class="check"><input id="aForget" type="checkbox"> Forget the saved host key (tick if the server was rebuilt, then check and confirm the new one)</label>
     <div id="accessResult" class="result" role="status" aria-live="polite" hidden></div>
     <div class="dialogbtns split">
       <button id="accessRemove" class="btn danger" type="button" hidden>Remove credentials</button>
@@ -128,8 +139,8 @@
       <button id="accessTest" class="btn" type="button">Test connection</button>
       <button id="accessSave" class="btn primary" type="submit">Save</button>
     </div>
-    <p class="fine">Credentials are encrypted on the dashboard and never shown again. The first connection to a host trusts
-      its SSH key and remembers it; a changed key is refused.</p>
+    <p class="fine">Credentials are encrypted on the dashboard and never shown again. A host's SSH key is trusted only after you
+      confirm its fingerprint, and a changed key is refused.</p>
   </form>
 </dialog>
 
@@ -140,35 +151,259 @@
   <ul id="historyList" class="managelist"></ul>
 </dialog>
 
-<dialog id="settings" class="wide" aria-labelledby="settingsTitle">
-  <div class="dhead"><h2 id="settingsTitle">Settings</h2>
-    <button id="settingsClose" class="btn small ghost" type="button">Close</button></div>
+<dialog id="install" class="wide xl" aria-labelledby="installTitle">
+  <div class="dhead"><h2 id="installTitle">Install apps</h2>
+    <button id="installClose" class="btn small ghost" type="button">Close</button></div>
+  <p class="muted">Pick apps from the <a href="https://community-scripts.org/scripts" target="_blank" rel="noopener noreferrer">community-scripts</a> library.
+    The dashboard prepares one reviewed, version-pinned script; <strong>you</strong> run it in the Proxmox shell. Nothing is installed from here.</p>
 
-  <h3>Log retention</h3>
-  <p class="muted">How many update logs to keep <strong>for each container</strong>. Older ones are deleted. Set to 1 to keep only the latest.</p>
-  <div class="inline">
-    <label for="sRetention" class="offscreen">Logs to keep per container</label>
-    <input id="sRetention" type="number" min="1" max="200" class="num">
-    <button id="sRetentionSave" class="btn" type="button">Save</button>
-    <span id="sRetentionMsg" class="muted" role="status"></span>
+  <div id="installPick">
+    <div class="inline">
+      <input id="catQ" class="search" type="search" placeholder="Search apps, e.g. jellyfin, dns, media" aria-label="Search the app library" autocomplete="off">
+    </div>
+    <div id="catTags" class="tagrow" aria-label="Filter by tag"></div>
+    <p id="catStatus" class="muted" role="status"></p>
+    <div class="installgrid">
+      <div>
+        <h3>Library</h3>
+        <ul id="catList" class="managelist tall"></ul>
+        <div class="inline"><button id="catMore" class="btn small ghost" type="button" hidden>Show more</button></div>
+      </div>
+      <div>
+        <h3>Your plan <span id="cartCount" class="muted"></span></h3>
+        <ul id="cartList" class="cart"></ul>
+        <p id="cartEmpty" class="muted">Nothing selected yet. Use “Add” on an app.</p>
+        <div class="grid2">
+          <div class="field"><label for="planHost">Install on</label><select id="planHost" class="select full"></select></div>
+          <div class="field"><label for="planBridge">Network bridge</label><input id="planBridge" type="text" list="dlBridge" placeholder="vmbr0 (default)" autocomplete="off"></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label for="planStorage">Container storage</label><input id="planStorage" type="text" list="dlRootdir" placeholder="script default" autocomplete="off"></div>
+          <div class="field"><label for="planTplStorage">Template storage</label><input id="planTplStorage" type="text" list="dlVztmpl" placeholder="script default" autocomplete="off"></div>
+        </div>
+        <label class="check"><input id="planDiag" type="checkbox" checked> Don't send install diagnostics to the community-scripts project (the scripts ask once per node)</label>
+        <div class="dialogbtns"><button id="planBtn" class="btn primary" type="button">Review plan</button></div>
+        <p id="planErr" class="err" role="alert"></p>
+      </div>
+    </div>
   </div>
 
-  <h3>Password</h3>
-  <form id="pwForm" class="stack" novalidate>
-    <label for="pwCur">Current password</label>
-    <input id="pwCur" type="password" autocomplete="current-password">
-    <label for="pwNew">New password (10+ characters)</label>
-    <input id="pwNew" type="password" autocomplete="new-password">
-    <label for="pwNew2">Repeat new password</label>
-    <input id="pwNew2" type="password" autocomplete="new-password">
-    <div class="inline"><button class="btn" type="submit">Change password</button><span id="pwMsg" class="muted" role="status"></span></div>
-  </form>
+  <datalist id="dlBridge"></datalist><datalist id="dlRootdir"></datalist><datalist id="dlVztmpl"></datalist>
+  <div id="installPlan" hidden>
+    <div class="inline"><button id="planBack" class="btn small ghost" type="button">← Back to the list</button></div>
+    <div class="banner">This runs scripts from GitHub as <strong>root on your Proxmox node</strong>. Read them first; each link below is pinned to the exact version.</div>
+    <ul id="planApps" class="cart"></ul>
+    <ol class="steps">
+      <li>Open the shell of <strong id="planNode">your Proxmox node</strong> (Datacenter → node → Shell).</li>
+      <li>Paste the script below and press Enter. It stops at the first failure.</li>
+      <li>When it finishes, come back and use <em>Manage containers</em> to start managing the new containers.</li>
+    </ol>
+    <div class="inline"><button id="planCopy" class="btn primary" type="button">Copy script</button><span id="planCopyMsg" class="muted" role="status"></span></div>
+    <pre id="planScript" class="notes selectable tallpre"></pre>
+  </div>
+</dialog>
 
-  <h3>Recent activity</h3>
-  <ul id="auditList" class="audit"></ul>
+<dialog id="settings" class="wide xl" aria-labelledby="settingsTitle">
+  <div class="dhead"><h2 id="settingsTitle">Settings</h2>
+    <button id="settingsClose" class="btn small ghost" type="button">Close</button></div>
+  <div class="tabs" role="tablist" aria-label="Settings sections">
+    <button class="tab" role="tab" id="tab-general" aria-controls="pane-general" aria-selected="true" data-pane="general" type="button">General</button>
+    <button class="tab" role="tab" id="tab-appearance" aria-controls="pane-appearance" aria-selected="false" data-pane="appearance" type="button" tabindex="-1">Appearance</button>
+    <button class="tab" role="tab" id="tab-security" aria-controls="pane-security" aria-selected="false" data-pane="security" type="button" tabindex="-1">Security</button>
+    <button class="tab" role="tab" id="tab-hosts" aria-controls="pane-hosts" aria-selected="false" data-pane="hosts" type="button" tabindex="-1">Proxmox hosts</button>
+    <button class="tab" role="tab" id="tab-integrations" aria-controls="pane-integrations" aria-selected="false" data-pane="integrations" type="button" tabindex="-1">Integrations</button>
+    <button class="tab" role="tab" id="tab-automation" aria-controls="pane-automation" aria-selected="false" data-pane="automation" type="button" tabindex="-1">Automation</button>
+    <button class="tab" role="tab" id="tab-activity" aria-controls="pane-activity" aria-selected="false" data-pane="activity" type="button" tabindex="-1">Activity</button>
+  </div>
 
-  <h3>About</h3>
-  <p id="aboutText" class="muted"></p>
+  <section id="pane-general" role="tabpanel" aria-labelledby="tab-general">
+    <h3>Log retention</h3>
+    <p class="muted">How many update logs to keep <strong>for each container</strong>. Older ones are deleted. Set to 1 to keep only the latest.</p>
+    <div class="inline">
+      <label for="sRetention" class="offscreen">Logs to keep per container</label>
+      <input id="sRetention" type="number" min="1" max="200" class="num">
+      <button id="sRetentionSave" class="btn" type="button">Save</button>
+      <span id="sRetentionMsg" class="muted" role="status"></span>
+    </div>
+    <h3>About</h3>
+    <p id="aboutText" class="muted"></p>
+  </section>
+
+  <section id="pane-appearance" role="tabpanel" aria-labelledby="tab-appearance" hidden>
+    <h3>Presets</h3>
+    <div id="presetGrid" class="presets" role="group" aria-label="Theme presets"></div>
+    <h3>Customise</h3>
+    <div class="grid2">
+      <div class="field"><label for="thMode">Colour mode</label>
+        <select id="thMode" class="select full"><option value="auto">Follow my device</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
+      <div class="field"><label for="thBgType">Background</label>
+        <select id="thBgType" class="select full"><option value="none">Plain</option><option value="solid">Solid colour</option>
+          <option value="linear">Linear gradient</option><option value="radial">Radial gradient</option></select></div>
+    </div>
+    <div id="thColorsRow" class="inline" hidden>
+      <label class="swatch">Colour 1 <input id="thC1" type="color" value="#0b1020"></label>
+      <label class="swatch" id="thC2Wrap">Colour 2 <input id="thC2" type="color" value="#1b2a4a"></label>
+      <label class="swatch" id="thC3Wrap"><span><input id="thC3On" type="checkbox"> Colour 3</span> <input id="thC3" type="color" value="#2c5364"></label>
+    </div>
+    <div id="thAngleRow" class="field" hidden><label for="thAngle">Angle <span id="thAngleOut" class="muted"></span></label>
+      <input id="thAngle" type="range" min="0" max="360" step="5" value="160"></div>
+    <div class="inline">
+      <label class="swatch"><span><input id="thAccentOn" type="checkbox"> Custom accent colour</span> <input id="thAccent" type="color" value="#7c98ff"></label>
+    </div>
+    <p class="fine">Changes show right away. They apply to everyone who signs in, including the sign-in page. Text always sits on solid panels, so any background stays readable.</p>
+    <div class="dialogbtns"><button id="thReset" class="btn ghost" type="button">Reset to default</button><button id="thRevert" class="btn ghost" type="button">Revert changes</button><button id="thSave" class="btn primary" type="button">Save theme</button></div>
+    <p id="thMsg" class="muted" role="status"></p>
+  </section>
+
+  <section id="pane-security" role="tabpanel" aria-labelledby="tab-security" hidden>
+    <h3>Password</h3>
+    <form id="pwForm" class="stack" novalidate>
+      <label for="pwCur">Current password</label>
+      <input id="pwCur" type="password" autocomplete="current-password">
+      <label for="pwNew">New password (10+ characters)</label>
+      <input id="pwNew" type="password" autocomplete="new-password">
+      <label for="pwNew2">Repeat new password</label>
+      <input id="pwNew2" type="password" autocomplete="new-password">
+      <div class="inline"><button class="btn" type="submit">Change password</button><span id="pwMsg" class="muted" role="status"></span></div>
+    </form>
+
+    <h3>Two-factor sign-in</h3>
+    <p class="muted">A 6-digit code from an authenticator app (or a recovery code) is needed in addition to the password.
+      Strongly recommended: this tool can run commands as root in your containers.</p>
+    <div id="tfaOff" hidden>
+      <form id="tfaBeginForm" class="stack" novalidate>
+        <label for="tfaPw">Your password</label>
+        <input id="tfaPw" type="password" autocomplete="current-password">
+        <div class="inline"><button class="btn" type="submit">Set up two-factor</button><span id="tfaMsg" class="muted" role="status"></span></div>
+      </form>
+    </div>
+    <div id="tfaSetup" hidden>
+      <p>Add this key to your authenticator app (choose “enter a setup key”, time-based, SHA-1, 6 digits):</p>
+      <pre id="tfaSecret" class="notes selectable"></pre>
+      <p class="fine">Or paste this address into apps that accept one: <code id="tfaUri" class="selectable"></code></p>
+      <form id="tfaEnableForm" class="stack" novalidate>
+        <label for="tfaCode">Code from the app</label>
+        <input id="tfaCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+        <div class="inline"><button class="btn primary" type="submit">Turn on</button><span id="tfaMsg2" class="err" role="status"></span></div>
+      </form>
+    </div>
+    <div id="tfaCodes" hidden>
+      <p class="banner">Save these recovery codes now. Each works once, and they are not shown again.</p>
+      <pre id="tfaCodeList" class="notes selectable"></pre>
+      <div class="inline"><button id="tfaCopy" class="btn small" type="button">Copy codes</button>
+        <button id="tfaDone" class="btn small ghost" type="button">I saved them</button></div>
+    </div>
+    <div id="tfaOn" hidden>
+      <p><span class="badge current">On</span> <span id="tfaLeft" class="muted"></span></p>
+      <form id="tfaDisableForm" class="stack" novalidate>
+        <label for="tfaOffPw">Password</label>
+        <input id="tfaOffPw" type="password" autocomplete="current-password">
+        <label for="tfaOffCode">Code (or a recovery code)</label>
+        <input id="tfaOffCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="24">
+        <div class="inline"><button class="btn danger" type="submit">Turn off two-factor</button><span id="tfaMsg3" class="err" role="status"></span></div>
+      </form>
+    </div>
+
+    <h3>Active sessions</h3>
+    <ul id="sessionList" class="audit tall"></ul>
+    <div class="inline"><button id="sessionsRevokeAll" class="btn small" type="button">Sign out all other sessions</button></div>
+  </section>
+
+  <section id="pane-hosts" role="tabpanel" aria-labelledby="tab-hosts" hidden>
+    <h3>Proxmox hosts</h3>
+    <p class="muted">Each node is managed through its own restricted gate. Nodes can be independent (not clustered); the same CT number may exist on each.</p>
+    <ul id="hostList" class="audit tall"></ul>
+    <h3>Add a Proxmox host</h3>
+    <ol class="steps">
+      <li>Name it and give its address.</li>
+      <li>Copy the setup script and run it as root in that node's shell. It installs the gate and the dashboard's key (it is self-contained; read it first).</li>
+      <li>Check the node's SSH host key here, compare the fingerprint, and confirm it.</li>
+      <li>Add the node. The dashboard checks that the gate answers.</li>
+    </ol>
+    <div class="grid2">
+      <div class="field"><label for="hName">Name</label><input id="hName" type="text" maxlength="40" placeholder="pve2" autocomplete="off"></div>
+      <div class="field"><label for="hAddr">Address</label><input id="hAddr" type="text" placeholder="10.10.56.6" autocomplete="off" spellcheck="false"></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label for="hIps">This dashboard's address as the node sees it</label><input id="hIps" type="text" placeholder="10.10.56.16" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label for="hAllow">Containers to allow now (CT numbers, optional)</label><input id="hAllow" type="text" placeholder="101 102" autocomplete="off"></div>
+    </div>
+    <div class="inline"><button id="hScript" class="btn" type="button">Show setup script</button>
+      <button id="hScriptCopy" class="btn small ghost" type="button" hidden>Copy script</button><span id="hScriptMsg" class="muted" role="status"></span></div>
+    <pre id="hScriptText" class="notes selectable tallpre" hidden></pre>
+    <div class="inline"><button id="hKeyBtn" class="btn small" type="button">Check host key</button><span id="hKeyState" class="muted" role="status"></span></div>
+    <div id="hKeyList"></div>
+    <label class="check" id="hKeyConfirmRow" hidden><input id="hTrust" type="checkbox"><span>I compared this fingerprint with the one on the node and it matches</span></label>
+    <div class="dialogbtns"><button id="hAdd" class="btn primary" type="button">Add host</button></div>
+    <p id="hMsg" class="err" role="status"></p>
+  </section>
+
+  <section id="pane-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden>
+    <h3>API tokens (Homarr and other dashboards)</h3>
+    <p class="muted">A token can read one thing: a summary (how many containers are running and how many need application,
+      system or security updates). It can't change anything. Only a hash is stored; the token is shown once.</p>
+    <form id="tokForm" class="inline" novalidate>
+      <label for="tokName" class="offscreen">Token name</label>
+      <input id="tokName" type="text" maxlength="40" placeholder="homarr" autocomplete="off">
+      <label class="check"><input id="tokDetail" type="checkbox"> include container names</label>
+      <button class="btn" type="submit">Create token</button>
+    </form>
+    <p id="tokMsg" class="err" role="status"></p>
+    <div id="tokNew" hidden>
+      <p class="banner">Copy this token now. It is not shown again.</p>
+      <pre id="tokValue" class="notes selectable"></pre>
+      <div class="inline"><button id="tokCopy" class="btn small" type="button">Copy token</button></div>
+    </div>
+    <ul id="tokList" class="audit tall"></ul>
+    <h3>Use it in Homarr</h3>
+    <ol class="steps">
+      <li>Homarr → <em>Management → Custom widgets</em> → create a <em>Custom API</em> widget.</li>
+      <li>URL: <code id="tokUrl" class="selectable"></code> · Method: GET · Authentication: Bearer, with the token.</li>
+      <li>Show the fields you want. The response looks like this right now:</li>
+    </ol>
+    <pre id="summaryPreview" class="notes tallpre"></pre>
+
+    <h3>Commands that need approval on a Proxmox host</h3>
+    <p class="muted">The gate only runs update and check commands from a built-in list. Commands from your own
+      <code>services:</code> overrides must be approved by adding them, one per line, to
+      <code>/etc/updatedash-gate.commands</code> on the host.</p>
+    <pre id="cmdList" class="notes selectable"></pre>
+    <div class="inline"><button id="cmdCopy" class="btn small" type="button" hidden>Copy</button></div>
+  </section>
+
+  <section id="pane-automation" role="tabpanel" aria-labelledby="tab-automation" hidden>
+    <h3>Notifications</h3>
+    <p class="muted">Get a message when a <strong>new</strong> security or application update appears (not on every check). The message lists container
+      names and versions only. Works with <a href="https://ntfy.sh" target="_blank" rel="noopener noreferrer">ntfy</a> (including a self-hosted one),
+      or any webhook that accepts JSON (Discord, Slack, Home Assistant, n8n…).</p>
+    <div class="grid2">
+      <div class="field"><label for="nKind">Type</label>
+        <select id="nKind" class="select full"><option value="ntfy">ntfy topic</option><option value="webhook">Webhook (JSON)</option></select></div>
+      <div class="field"><label for="nUrl">Address</label>
+        <input id="nUrl" type="text" placeholder="http://10.10.56.40:8080/updates" autocomplete="off" spellcheck="false"></div>
+    </div>
+    <label class="check"><input id="nOn" type="checkbox"> Send notifications</label>
+    <div class="inline"><button id="nSave" class="btn primary" type="button">Save</button>
+      <button id="nTest" class="btn" type="button">Send a test</button><span id="nMsg" class="muted" role="status"></span></div>
+    <p class="fine">Anyone with the address can read these messages: use an unguessable ntfy topic or a protected endpoint. No credentials are stored here, and redirects are not followed.</p>
+
+    <h3>Automatic system updates</h3>
+    <div class="banner">Ticked containers get <em>Update system</em> run for them automatically, once a day after the hour below, <strong>only when a
+      security update is pending</strong>. It is the same action as the button (snapshot first on Proxmox containers, full <code>apt upgrade</code>,
+      no reboot) and shows in the audit log as <code>schedule</code>. Nothing is automatic until you tick it. Avoid it for containers where an
+      unattended upgrade would hurt (databases, password managers).</div>
+    <div class="inline"><label for="aHour">Run after</label>
+      <select id="aHour" class="select"></select><span class="muted">(this dashboard's local time)</span></div>
+    <input id="autoFilter" class="search" type="search" placeholder="Filter containers" aria-label="Filter containers" autocomplete="off">
+    <ul id="autoList" class="managelist tall"></ul>
+    <div class="inline"><button id="autoSave" class="btn primary" type="button">Save</button><span id="autoMsg" class="muted" role="status"></span></div>
+  </section>
+
+  <section id="pane-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+    <h3>Recent activity</h3>
+    <p id="auditChain" class="muted" role="status"></p>
+    <ul id="auditList" class="audit tall"></ul>
+  </section>
 </dialog>
 
 <script src="/static/app.js"></script>

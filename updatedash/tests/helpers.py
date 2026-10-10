@@ -8,16 +8,30 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from udash.config import load_config  # noqa: E402
-from udash.server import App, make_handler  # noqa: E402
+from udash.server import App, LimitedServer, make_handler, wrap_tls  # noqa: E402
 
 PASSWORD = "correct horse battery"
+
+
+class FakeVault:
+    key = b"k" * 32
+
+    def derive(self, label):
+        import hashlib
+        import hmac
+        return hmac.new(self.key, label, hashlib.sha256).digest()
+
+    def encrypt(self, s):
+        return "enc:" + s[::-1]
+
+    def decrypt(self, t):
+        return t[4:][::-1]
 
 
 def write_config(tmp, extra=""):
@@ -39,10 +53,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base):
+    def __init__(self, base, cafile=None):
         self.base = base
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), NoRedirect)
+        handlers = [urllib.request.HTTPCookieProcessor(self.jar), NoRedirect]
+        if cafile:
+            import ssl
+            handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=cafile)))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def call(self, method, path, body=None, headers=None, csrf=True):
         h = dict(headers or {})
@@ -77,18 +95,25 @@ class Client:
 class AppCase(unittest.TestCase):
     extra_config = ""
 
+    def prepare(self):
+        """Hook for subclasses: runs after the temp dir exists and before the app starts."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="udtest-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        cfg = load_config(write_config(self.tmp, self.extra_config))
+        self.prepare()
+        cfg = load_config(write_config(self.tmp, self.extra_config.replace("__TMP__", self.tmp)))
         self.app = App(cfg, state_dir=Path(self.tmp) / "state", base_dir=ROOT)
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
-        self.srv.daemon_threads = True
+        self.srv = LimitedServer(("127.0.0.1", 0), make_handler(self.app), max_connections=self.app.cfg["max_connections"])
+        wrap_tls(self.srv, self.app)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
-        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        self.c = Client(self.base)
+        self.port = self.srv.server_address[1]
+        scheme = "https" if self.app.tls else "http"
+        host = "localhost" if self.app.tls else "127.0.0.1"
+        self.base = f"{scheme}://{host}:{self.port}"
+        self.c = Client(self.base, cafile=self.app.tls_cert)
 
     def signed_in(self):
         st, _, _ = self.c.login()

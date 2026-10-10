@@ -12,9 +12,15 @@ DEFAULTS = {
     "listen": "127.0.0.1:8099",
     "username": "admin",
     "session_hours": 12,
+    "allow_from": [],           # if set, only these IPs/CIDRs may reach the dashboard at all (else 403)
     "trust_proxy": [],          # IPs/CIDRs of reverse proxies whose X-Forwarded-* headers are trusted
+    "tls": "off",               # "auto" = generate and use a self-signed certificate (see tls_names)
+    "tls_names": [],            # extra DNS names/IPs for the self-signed certificate
     "tls_cert": "",
     "tls_key": "",
+    "session_idle_minutes": 480,
+    "max_connections": 64,
+    "socket_timeout": 30,
     "transport": "pve",
     "snapshot_before_update": True,
     "keep_snapshots": 2,
@@ -52,7 +58,9 @@ def load_config(path=None):
     if cfg["transport"] == "pve" and not (cfg.get("pve") or {}).get("host"):
         # Direct-SSH-only installs are fine, but the gate needs a host.
         cfg["pve"] = dict(cfg.get("pve") or {})
-    for key, lo, hi in (("session_hours", 1, 720), ("log_retention", 1, 200), ("max_parallel_updates", 1, 8),
+    if cfg["tls"] not in ("off", "auto"):
+        raise ConfigError("tls must be 'off' or 'auto' (or set tls_cert and tls_key)")
+    for key, lo, hi in (("session_idle_minutes", 5, 10080), ("max_connections", 8, 1024), ("socket_timeout", 1, 300), ("session_hours", 1, 720), ("log_retention", 1, 200), ("max_parallel_updates", 1, 8),
                         ("keep_snapshots", 0, 20), ("check_interval_minutes", 5, 10080)):
         try:
             cfg[key] = int(cfg[key])
@@ -67,6 +75,13 @@ def load_config(path=None):
         except ValueError:
             raise ConfigError(f"trust_proxy entry is not an IP or CIDR: {item}")
     cfg["_trusted_nets"] = nets
+    allow = []
+    for item in cfg["allow_from"] or []:
+        try:
+            allow.append(ipaddress.ip_network(str(item), strict=False))
+        except ValueError:
+            raise ConfigError(f"allow_from entry is not an IP or CIDR: {item}")
+    cfg["_allow_nets"] = allow
     seen = set()
     for s in cfg["services"]:
         if not isinstance(s, dict) or not s.get("name") or s.get("ctid") is None:
@@ -76,6 +91,17 @@ def load_config(path=None):
             raise ConfigError(f"duplicate ctid {s['ctid']} in services")
         seen.add(s["ctid"])
     return cfg
+
+
+def is_allowed_client(cfg, ip):
+    """True when no allowlist is configured, or the client address is inside it."""
+    if not cfg["_allow_nets"]:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in n for n in cfg["_allow_nets"])
 
 
 def is_trusted_proxy(cfg, ip):

@@ -18,6 +18,9 @@
 #   STORAGE / TEMPLATE_STORAGE  [first active rootdir / vztmpl storage]
 #   PVE_HOST      address of this host as seen by the container [auto]
 #   ALLOW_CTIDS   space-separated CT IDs the dashboard may manage [prompted]
+#   GATE_USER     [updatedash-gate] unprivileged host account the dashboard's key logs in as. It can only run the
+#                 gate through sudo; the dashboard no longer holds a root login on this host. GATE_USER=root keeps
+#                 the old behaviour (not recommended).
 #   ASSUME_YES=1  don't ask before changing host files
 #   SETUP_GATE=1  with CTID=<existing>: also (re)do the host-side gate setup
 #   GUI_MANAGE    [1] let the dashboard add/remove CT IDs from its web UI. 0 turns that off and
@@ -47,9 +50,14 @@ GUI_MANAGE="${GUI_MANAGE:-1}"; PROTECTED_CTIDS="${PROTECTED_CTIDS-__unset__}"
 SRC_DIR=/root/updatedash-src
 GATE_BIN="${GATE_BIN:-/usr/local/sbin/updatedash-gate}"
 ALLOW_FILE="${ALLOW_FILE:-/etc/updatedash-gate.allow}"
-AUTH_KEYS="${AUTH_KEYS:-/root/.ssh/authorized_keys}"
+GATE_USER="${GATE_USER:-updatedash-gate}"
+[[ "$GATE_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "Unsafe GATE_USER value."
+if [ "$GATE_USER" = root ]; then GATE_HOME=/root; else GATE_HOME="/var/lib/$GATE_USER"; fi
+AUTH_KEYS="${AUTH_KEYS:-$GATE_HOME/.ssh/authorized_keys}"
+SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/updatedash-gate}"
 MANAGE_FLAG="${MANAGE_FLAG:-/etc/updatedash-gate.manage}"
 PROTECTED_FILE="${PROTECTED_FILE:-/etc/updatedash-gate.protected}"
+COMMANDS_FILE="${COMMANDS_FILE:-/etc/updatedash-gate.commands}"
 
 if [ -z "$REPO_URL" ]; then
   tty_ok || die "Set REPO_URL (git URL or a local repo path on this host)."
@@ -153,16 +161,22 @@ setup_gate() {
     ids+=("$id")
   done
 
-  entry="command=\"${GATE_BIN}\",from=\"${ct_ip}\",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding ${pub}"
+  if [ "$GATE_USER" = root ]; then GATE_CMD="${GATE_BIN}"; else GATE_CMD="sudo -n ${GATE_BIN}"; fi
+  entry="command=\"${GATE_CMD}\",from=\"${ct_ip}\",restrict ${pub}"
   echo
   msg "About to change this Proxmox host:"
-  echo "   - install ${GATE_BIN} (restricts the key to pct exec/snapshot)"
+  echo "   - install ${GATE_BIN}: the key can only run pct exec/snapshot, only for the allowed CT IDs, and only"
+  echo "     for a built-in list of update/check commands (extras go in ${COMMANDS_FILE}); every request is logged to syslog"
   echo "   - allow CT IDs: ${ids[*]:-<none yet>}   (${ALLOW_FILE})"
   if [ "$GUI_MANAGE" = 1 ]; then
     echo "   - turn ON web-UI management of that list (${MANAGE_FLAG}); protected IDs: ${PROTECTED_CTIDS:-<none>}"
     echo "     NOTE: with this on, anyone who gets into the dashboard can add other containers (except protected ones)."
   else
     echo "   - web-UI management of the list stays OFF (edit ${ALLOW_FILE} by hand)"
+  fi
+  if [ "$GATE_USER" != root ]; then
+    echo "   - create the unprivileged user '${GATE_USER}' (no password, no way to sign in except this one restricted key)"
+    echo "     and allow it to run ONLY ${GATE_BIN} as root through sudo (${SUDOERS_FILE})"
   fi
   echo "   - add this line to ${AUTH_KEYS}:"
   echo "     ${entry:0:150}..."
@@ -186,13 +200,57 @@ setup_gate() {
   else
     rm -f "$MANAGE_FLAG"
   fi
+  [ -f "$COMMANDS_FILE" ] || printf '%s\n' "# Extra commands the dashboard may run inside allowed containers, one exact command per line." \
+    "# The Settings screen of the dashboard lists the ones from your config that need approval here." > "$COMMANDS_FILE"
+  if [ "$GATE_USER" != root ]; then
+    command -v sudo >/dev/null 2>&1 || { msg "Installing sudo (needed so '${GATE_USER}' can run the gate)"; apt-get install -y sudo >/dev/null; }
+    id "$GATE_USER" >/dev/null 2>&1 || useradd --system --home-dir "$GATE_HOME" --shell /bin/sh "$GATE_USER"
+    usermod -p '*' "$GATE_USER"                         # no password, but not "locked" (locked accounts can refuse key logins)
+    mkdir -p "$GATE_HOME/.ssh"
+    chown root:root "$GATE_HOME" "$GATE_HOME/.ssh"; chmod 755 "$GATE_HOME"; chmod 755 "$GATE_HOME/.ssh"   # root-owned: the account can't edit its own key file
+    tmpsudo="$(mktemp)"
+    cat > "$tmpsudo" <<SUDOERS
+Defaults!${GATE_BIN} env_keep += "SSH_ORIGINAL_COMMAND SSH_CONNECTION SSH_CLIENT"
+${GATE_USER} ALL=(root) NOPASSWD: ${GATE_BIN}
+SUDOERS
+    visudo -cf "$tmpsudo" >/dev/null || die "Generated sudoers rule did not validate; nothing was installed."
+    install -m 0440 -o root -g root "$tmpsudo" "$SUDOERS_FILE"; rm -f "$tmpsudo"
+  fi
   mkdir -p "$(dirname "$AUTH_KEYS")"; touch "$AUTH_KEYS"
-  grep -qF "$keyblob" "$AUTH_KEYS" || echo "$entry" >> "$AUTH_KEYS"
+  # add the dashboard's key, or replace an older line for the same key (so re-running upgrades its restrictions)
+  tmpkeys="$(mktemp)"
+  { grep -vF "$keyblob" "$AUTH_KEYS" || true; echo "$entry"; } > "$tmpkeys"
+  cat "$tmpkeys" > "$AUTH_KEYS"
+  rm -f "$tmpkeys"
+  if [ "$GATE_USER" != root ]; then chown root:root "$AUTH_KEYS"; chmod 644 "$AUTH_KEYS"; fi
   msg "Gate installed."
 
   [ -n "$PVE_HOST" ] || PVE_HOST="$(ip -4 route get "$ct_ip" 2>/dev/null | grep -oP 'src \K\S+' | head -1 || true)"
   [ -n "$PVE_HOST" ] || PVE_HOST="$(hostname -I | awk '{print $1}')"
-  pct exec "$CTID" -- sed -i "s|^  host: .*|  host: ${PVE_HOST}|" /etc/updatedash/config.yaml
+  pct exec "$CTID" -- sed -i -e "s|^  host: .*|  host: ${PVE_HOST}|" -e "s|^  user: .*|  user: ${GATE_USER}|" /etc/updatedash/config.yaml
+  # Pre-trust this host's SSH key inside the dashboard, so its first connection to Proxmox can't be intercepted.
+  local hostpub
+  hostpub="$(awk '{print $1" "$2}' /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || true)"
+  if [ -n "$hostpub" ]; then
+    pct exec "$CTID" -- sh -c "grep -qF '${PVE_HOST} ${hostpub}' /var/lib/updatedash/known_hosts 2>/dev/null || echo '${PVE_HOST} ${hostpub}' >> /var/lib/updatedash/known_hosts; chown updatedash:updatedash /var/lib/updatedash/known_hosts; chmod 600 /var/lib/updatedash/known_hosts"
+  else
+    warn "Could not read /etc/ssh/ssh_host_ed25519_key.pub; the dashboard will trust this host's key on first use."
+  fi
+  if [ "$GATE_USER" != root ]; then
+    # Prove the new login works from the dashboard container BEFORE retiring the old root-owned key line.
+    if pct exec "$CTID" -- runuser -u updatedash -- ssh -i /etc/updatedash/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile=/var/lib/updatedash/known_hosts -o StrictHostKeyChecking=yes "${GATE_USER}@${PVE_HOST}" "pct list" >/dev/null 2>&1; then
+      msg "Login as ${GATE_USER} works."
+      if [ -f /root/.ssh/authorized_keys ] && grep -qF "$keyblob" /root/.ssh/authorized_keys; then
+        tmpkeys="$(mktemp)"; grep -vF "$keyblob" /root/.ssh/authorized_keys > "$tmpkeys" || true
+        cat "$tmpkeys" > /root/.ssh/authorized_keys; rm -f "$tmpkeys"
+        msg "Removed the dashboard's old root login from /root/.ssh/authorized_keys."
+      fi
+    else
+      warn "Could not log in as ${GATE_USER} from the dashboard container. The old root key line (if any) was left in place."
+      warn "Check: sshd AllowUsers/Match rules, 'journalctl -u ssh' on this host. To go back: GATE_USER=root SETUP_GATE=1 CTID=${CTID} ..."
+    fi
+  fi
   pct exec "$CTID" -- systemctl restart updatedash
   CT_IP="$ct_ip"
 }
@@ -217,12 +275,18 @@ pct exec "$CTID" -- systemctl restart updatedash
 
 echo
 msg "Done."
-echo "   Dashboard : http://${CT_IP}:8099   (CT $CTID)"
+SCHEME=http
+pct exec "$CTID" -- grep -qE '^tls: *auto' /etc/updatedash/config.yaml 2>/dev/null && SCHEME=https
+echo "   Dashboard : ${SCHEME}://${CT_IP}:8099   (CT $CTID)"
+if [ "$SCHEME" = https ]; then
+  echo "               self-signed certificate: your browser will warn once. In Nginx Proxy Manager use scheme https to this address."
+fi
 PLAIN_PW="$(pct exec "$CTID" -- awk -F'"' '/^password:/ {print $2}' /etc/updatedash/config.yaml 2>/dev/null || true)"
 if [ -n "$PLAIN_PW" ]; then
   echo "   Login     : admin / $PLAIN_PW   (plaintext in the config; set a new one under Settings)"
 else
   echo "   Login     : admin   (a new install prints its generated password once, above; otherwise use your existing one)"
 fi
-echo "   Next      : edit your services in the container: pct exec $CTID -- nano /etc/updatedash/config.yaml"
+echo "   Next      : sign in, then Settings -> turn on two-factor sign-in (this tool can run commands as root)."
+echo "               Edit your services in the container: pct exec $CTID -- nano /etc/updatedash/config.yaml"
 echo "               then: pct exec $CTID -- systemctl restart updatedash"

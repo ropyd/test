@@ -31,6 +31,8 @@ if [ ! -f /etc/updatedash/config.yaml ]; then
   NEWPASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
   HASH="$(printf '%s' "$NEWPASS" | python3 "$APP/app.py" hash-password)"
   sed -i "s|^password_hash:.*|password_hash: \"$HASH\"|" /etc/updatedash/config.yaml
+  # new installs serve HTTPS with a generated self-signed certificate (the first start creates it)
+  grep -q '^tls:' /etc/updatedash/config.yaml || echo 'tls: auto' >> /etc/updatedash/config.yaml
 fi
 
 # key that encrypts stored credentials and signs sessions (kept apart from the data directory)
@@ -90,7 +92,8 @@ cat <<MSG
 
    $(cat /etc/updatedash/id_ed25519.pub)
 
-2. Open http://$IP:8099 (put it behind HTTPS before exposing it beyond your LAN).
+2. Open the dashboard at port 8099 on $IP. New installs use HTTPS with a self-signed certificate; to see it
+   without the browser warning, front it with a reverse proxy. Then turn on two-factor sign-in under Settings.
 MSG
 if [ -n "$NEWPASS" ]; then
   echo

@@ -13,4 +13,4 @@ if [ "${1:-}" = "--purge" ]; then
 else
   echo "Removed the program. Kept /etc/updatedash and /var/lib/updatedash (use --purge to delete them)."
 fi
-echo "On the Proxmox host, also remove the updatedash line from /root/.ssh/authorized_keys and /usr/local/sbin/updatedash-gate, /etc/updatedash-gate.*"
+echo "On the Proxmox host, also remove the user: userdel updatedash-gate; rm -rf /var/lib/updatedash-gate /etc/sudoers.d/updatedash-gate (and any updatedash line in /root/.ssh/authorized_keys from older installs), plus /usr/local/sbin/updatedash-gate and /etc/updatedash-gate.*"

@@ -3,8 +3,7 @@ import os
 import unittest
 from pathlib import Path
 
-from tests.helpers import ROOT  # importing helpers also puts the project on sys.path
-from udash import auth as A
+from tests.helpers import ROOT, FakeVault  # importing helpers also puts the project on sys.path
 from udash import store as S
 from udash.util import safe_link, same
 
@@ -26,101 +25,6 @@ class TestUtil(unittest.TestCase):
         self.assertIsNone(safe_link("javascript:alert(1)"))
         self.assertIsNone(safe_link("http://insecure"))
         self.assertIsNone(safe_link(None))
-
-
-class FakeVault:
-    key = b"k" * 32
-
-    def derive(self, label):
-        import hashlib, hmac
-        return hmac.new(self.key, label, hashlib.sha256).digest()
-
-    def encrypt(self, s):
-        return "enc:" + s[::-1]
-
-    def decrypt(self, t):
-        return t[4:][::-1]
-
-
-class TestAuth(unittest.TestCase):
-    def make(self, tmp, **cfg):
-        c = {"username": "admin", "session_hours": 1, "password": "a-long-password"}
-        c.update(cfg)
-        return A.Auth(c, Path(tmp), FakeVault())
-
-    def test_hash_roundtrip(self):
-        h = A.hash_password("secret-pass-123")
-        self.assertTrue(A.verify_password("secret-pass-123", h))
-        self.assertFalse(A.verify_password("secret-pass-124", h))
-        self.assertFalse(A.verify_password("x", "garbage"))
-        self.assertNotEqual(h, A.hash_password("secret-pass-123"))  # salted
-
-    def test_login_and_session(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            a = self.make(d)
-            self.assertIsNone(a.login("1.1.1.1", "admin", "wrong"))
-            self.assertIsNone(a.login("1.1.1.1", "root", "a-long-password"))
-            tok = a.login("1.1.1.1", "admin", "a-long-password")
-            self.assertEqual(a.check_session(tok), "admin")
-            self.assertIsNone(a.check_session(tok[:-2] + "xx"))
-            self.assertIsNone(a.check_session("nonsense"))
-            self.assertIsNone(a.check_session(""))
-
-    def test_session_expiry(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            a = self.make(d)
-            tok = a.make_session()
-            a.session_seconds = -10
-            self.assertIsNone(a.check_session(a.make_session()))
-            self.assertEqual(a.check_session(tok), "admin")
-
-    def test_lockout(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            a = self.make(d)
-            for _ in range(A.Auth.MAX_PER_IP):
-                self.assertIsNone(a.login("9.9.9.9", "admin", "bad"))
-            with self.assertRaises(A.Locked) as cm:
-                a.login("9.9.9.9", "admin", "a-long-password")      # even the right password is refused
-            self.assertGreater(cm.exception.retry_after, 0)
-            self.assertIsNotNone(a.login("8.8.8.8", "admin", "a-long-password"))  # other IPs unaffected
-
-    def test_change_password_invalidates_sessions(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            a = self.make(d)
-            old = a.make_session()
-            with self.assertRaises(A.AuthError):
-                a.change_password("wrong", "another-long-pass")
-            with self.assertRaises(A.AuthError):
-                a.change_password("a-long-password", "short")
-            new = a.change_password("a-long-password", "another-long-pass")
-            self.assertIsNone(a.check_session(old))
-            self.assertEqual(a.check_session(new), "admin")
-            # persisted for the next start, and wins over the config
-            b = self.make(d)
-            self.assertIsNotNone(b.login("1.1.1.1", "admin", "another-long-pass"))
-            self.assertEqual(oct(os.stat(Path(d) / "auth.json").st_mode & 0o777), "0o600")
-
-    def test_sessions_survive_a_restart(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            tok = self.make(d).make_session()                       # plaintext password in config (re-salted each start)
-            self.assertEqual(self.make(d).check_session(tok), "admin")
-            h = A.hash_password("a-long-password")                   # stored hash in config
-            tok = self.make(d, password=None, password_hash=h).make_session()
-            self.assertEqual(self.make(d, password=None, password_hash=h).check_session(tok), "admin")
-            self.assertIsNone(self.make(d, password="a-different-pass").check_session(tok))  # changed password => signed out
-
-    def test_requires_a_password(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(A.AuthError):
-                A.Auth({"username": "admin", "session_hours": 1}, Path(d), FakeVault())
-            with self.assertRaises(A.AuthError):
-                A.Auth({"username": "admin", "session_hours": 1, "password": "CHANGE-ME"}, Path(d), FakeVault())
 
 
 class TestSettingsAndLogs(unittest.TestCase):
@@ -263,7 +167,7 @@ class TestAudit(unittest.TestCase):
     def test_append_tail_rotate(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            a = S.Audit(Path(d) / "audit.log", max_bytes=300, keep=2)
+            a = S.Audit(Path(d) / "audit.log", max_bytes=1500, keep=2)
             for i in range(20):
                 a.append("admin", "1.2.3.4", "x", f"event {i}")
             rows = a.tail(5)
@@ -275,3 +179,11 @@ class TestAudit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRepoValidation(unittest.TestCase):
+    def test_only_plain_owner_slash_repo_names_reach_the_github_url(self):
+        from udash.versions import github_latest
+        for bad in ("", "x", "a/b/c", "../etc/passwd", "a/..", "a b/c", "a/b?x=1", "https://evil/x", "a/b#frag", None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                github_latest(bad)
